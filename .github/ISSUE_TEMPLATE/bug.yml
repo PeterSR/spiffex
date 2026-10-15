@@ -1,0 +1,25 @@
+name: Bug report
+description: Something does not behave as SPEC.md or the documentation says it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Configuration (with keys and tokens removed), commands, and client library versions.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: spiffex version
+      placeholder: spiffex version output, or a commit
+    validations:
+      required: true
