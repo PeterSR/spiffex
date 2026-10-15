@@ -34,6 +34,45 @@ spiffex is the small version:
   within the limits in [SPEC.md section 7](SPEC.md#7-notes-for-aws-federation)) verify its tokens
   without any extra component.
 
+## Try it
+
+From a checkout (`go build ./cmd/spiffex`, Go 1.25 or newer):
+
+```bash
+
+spiffex dev -dir ./td                    # a local trust domain with two workloads
+spiffex issuer -config ./td/issuer.yaml -listen 127.0.0.1:8443
+```
+
+In another terminal, run an agent for the `orders` workload and point any SPIFFE library at it:
+
+```bash
+spiffex agent -issuer http://127.0.0.1:8443 \
+  -client-id orders -key-file ./td/workloads/orders.key -socket ./td/orders.sock
+export SPIFFE_ENDPOINT_SOCKET=unix://$PWD/td/orders.sock
+```
+
+```go
+source, err := workloadapi.NewJWTSource(ctx)                // stock go-spiffe
+svid, err := source.FetchJWTSVID(ctx, jwtsvid.Params{Audience: "spiffe://spiffex.test/billing"})
+req.Header.Set("Authorization", "Bearer "+svid.Marshal())
+```
+
+On the receiving side, verify with the same source (`jwtsvid.ParseAndValidate(token, source,
+audiences)`), with the agent's `ValidateJWTSVID`, against the issuer's bundle endpoint, or with any
+OIDC library pointed at the issuer. A workload that cannot run an agent can speak OAuth 2.0 itself;
+`spiffex token` shows the exchange.
+
+## Running it
+
+- **[Configuration and operations](docs/configuration.md):** the issuer's configuration file,
+  registering workloads, the agent's flags, rotating signing keys.
+- **[Kubernetes](docs/kubernetes.md):** pods prove themselves with their service account tokens,
+  so nothing is registered per workload; the agent runs as a native sidecar.
+- **Proving identity:** with a private key per workload (`private_key_jwt`), or by exchanging a
+  token from an issuer the spiffex issuer trusts: a Kubernetes cluster, GitHub Actions, a cloud
+  provider.
+
 ## Relation to the SPIFFE standards
 
 | Standard | spiffex |

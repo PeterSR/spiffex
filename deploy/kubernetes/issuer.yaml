@@ -1,0 +1,139 @@
+# The spiffex issuer for a Kubernetes cluster, trusting the cluster's own
+# service account tokens. Before applying, create in the spiffex namespace:
+#
+#   Secret spiffex-signing-keys   key files made with: spiffex key add -dir <dir>
+#   Secret spiffex-issuer-tls     tls.crt and tls.key for spiffex-issuer.spiffex.svc
+#
+# Adjust trust_domain, and the upstream issuer if your cluster's service
+# account issuer differs (kubectl get --raw /.well-known/openid-configuration).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spiffex
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spiffex-issuer
+  namespace: spiffex
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spiffex-issuer
+  namespace: spiffex
+data:
+  issuer.yaml: |
+    issuer: https://spiffex-issuer.spiffex.svc
+    trust_domain: example.org
+    keys_dir: /keys
+    upstreams:
+      - name: kubernetes
+        issuer: https://kubernetes.default.svc.cluster.local
+        audience: spiffex
+        jwks_uri: https://kubernetes.default.svc.cluster.local/openid/v1/jwks
+        # The issuer's own service account may read the cluster's JWKS through
+        # the default system:service-account-issuer-discovery binding, if the
+        # distribution keeps it.
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        shared: false
+        rules:
+          # Every service account in the cluster, but only with a token bound
+          # to a running pod. Add a match (on kubernetes.io/namespace, say) to
+          # narrow it.
+          - require: [kubernetes.io/pod/name]
+            spiffe_id: spiffe://example.org/ns/{kubernetes.io/namespace}/sa/{kubernetes.io/serviceaccount/name}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spiffex-issuer
+  namespace: spiffex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: spiffex-issuer
+  template:
+    metadata:
+      labels:
+        app: spiffex-issuer
+    spec:
+      serviceAccountName: spiffex-issuer
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: issuer
+          image: ghcr.io/petersr/spiffex:latest
+          args:
+            - issuer
+            - -config=/config/issuer.yaml
+            - -listen=:8443
+            - -tls-cert=/tls/tls.crt
+            - -tls-key=/tls/tls.key
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: keys
+              mountPath: /keys
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: spiffex-issuer
+        - name: keys
+          secret:
+            secretName: spiffex-signing-keys
+        - name: tls
+          secret:
+            secretName: spiffex-issuer-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spiffex-issuer
+  namespace: spiffex
+spec:
+  selector:
+    app: spiffex-issuer
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: spiffex-issuer
+  namespace: spiffex
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: spiffex-issuer

@@ -1,0 +1,96 @@
+# A workload with the spiffex agent as a native sidecar (Kubernetes 1.29 or
+# newer). The agent exchanges the pod's service account token, projected with
+# the audience the issuer expects, for JWT-SVIDs; the app reaches the agent
+# through SPIFFE_ENDPOINT_SOCKET. This pod's SPIFFE ID is
+# spiffe://example.org/ns/shop/sa/billing.
+#
+# The spiffex-ca ConfigMap holds the CA of the issuer's TLS certificate; leave
+# it and -ca-file out when that certificate comes from a public CA.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: billing
+  namespace: shop
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app: billing
+  template:
+    metadata:
+      labels:
+        app: billing
+    spec:
+      serviceAccountName: billing
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: spiffex-agent
+          image: ghcr.io/petersr/spiffex:latest
+          restartPolicy: Always
+          args:
+            - agent
+            - -issuer=https://spiffex-issuer.spiffex.svc
+            - -trust-domain=example.org
+            - -subject-token-file=/var/run/secrets/spiffex/token
+            - -socket=/run/spiffex/agent.sock
+            - -ca-file=/etc/spiffex/ca.crt
+          # The app starts once the agent serves a trust bundle.
+          startupProbe:
+            exec:
+              command: [/spiffex, health, -socket=/run/spiffex/agent.sock]
+            periodSeconds: 1
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: spiffex-socket
+              mountPath: /run/spiffex
+            - name: spiffex-token
+              mountPath: /var/run/secrets/spiffex
+              readOnly: true
+            - name: spiffex-ca
+              mountPath: /etc/spiffex
+              readOnly: true
+      containers:
+        - name: app
+          image: registry.example.org/billing:1.0
+          env:
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: unix:///run/spiffex/agent.sock
+          volumeMounts:
+            - name: spiffex-socket
+              mountPath: /run/spiffex
+      volumes:
+        - name: spiffex-socket
+          emptyDir:
+            medium: Memory
+        - name: spiffex-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: spiffex
+                  expirationSeconds: 3600
+                  path: token
+        - name: spiffex-ca
+          configMap:
+            name: spiffex-ca

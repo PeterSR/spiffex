@@ -54,6 +54,8 @@ type Config struct {
 	Keys        KeySource
 	// Clients enables the client_credentials grant with private_key_jwt.
 	Clients ClientSource
+	// Exchanger enables the token exchange grant.
+	Exchanger Exchanger
 	// TokenTTL is the lifetime of issued JWT-SVIDs.
 	TokenTTL time.Duration
 	// ActivationDelay is how long a new key is published before it signs.
@@ -72,6 +74,9 @@ type Issuer struct {
 	cfg      Config
 	basePath string
 	replay   *replayCache
+	// These keep requests anyone can send from flooding the log, each on its
+	// own so that a flood of rejections cannot hide server errors.
+	rejectLog, errorLog logLimiter
 }
 
 // New validates cfg, fills in defaults and returns an Issuer.
@@ -192,6 +197,9 @@ func (iss *Issuer) grantTypes() []string {
 	if iss.cfg.Clients != nil {
 		grants = append(grants, GrantClientCredentials)
 	}
+	if iss.cfg.Exchanger != nil {
+		grants = append(grants, GrantTokenExchange)
+	}
 	return grants
 }
 
@@ -199,6 +207,9 @@ func (iss *Issuer) authMethods() []string {
 	methods := []string{}
 	if iss.cfg.Clients != nil {
 		methods = append(methods, "private_key_jwt")
+	}
+	if iss.cfg.Exchanger != nil {
+		methods = append(methods, "none")
 	}
 	return methods
 }

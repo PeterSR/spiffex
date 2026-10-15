@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PeterSR/spiffex/internal/exchange"
 )
 
 func publicPEM(t *testing.T) string {
@@ -104,4 +106,59 @@ func TestParseErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUpstreams(t *testing.T) {
+	base := "issuer: https://issuer.example.org\ntrust_domain: example.org\nkeys_dir: keys\nupstreams:\n"
+	upstream := func(fields string) string {
+		return base + "  - name: u\n    audience: spiffex\n" + fields
+	}
+	rule := "    rules:\n      - spiffe_id: spiffe://example.org/ns/{kubernetes.io/namespace}\n"
+	owned := "    rules:\n      - match: {repository_owner_id: \"42\"}\n        spiffe_id: spiffe://example.org/ci/{repository_id}\n"
+
+	good := map[string]string{
+		"kubernetes": upstream("    issuer: https://kubernetes.default.svc.cluster.local\n    jwks_uri: https://kubernetes.default.svc.cluster.local/openid/v1/jwks\n    shared: false\n" + rule),
+		"file":       upstream("    issuer: https://cluster.example.org\n    jwks_file: jwks.json\n" + rule),
+		"github":     upstream("    issuer: https://token.actions.githubusercontent.com\n    discovery: true\n" + owned),
+	}
+	for name, doc := range good {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Parse([]byte(doc), t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.Upstreams) != 1 || cfg.Upstreams[0].MaxTokenLifetime != DefaultMaxTokenLifetime {
+				t.Errorf("upstreams = %+v", cfg.Upstreams)
+			}
+		})
+	}
+
+	bad := map[string]string{
+		"shared not stated":                 upstream("    issuer: https://cluster.example.org\n    jwks_uri: https://cluster.example.org/jwks\n" + rule),
+		"github without an owner":           upstream("    issuer: https://token.actions.githubusercontent.com\n    discovery: true\n" + rule),
+		"github marked unshared":            upstream("    issuer: https://token.actions.githubusercontent.com\n    discovery: true\n    shared: false\n" + owned),
+		"http jwks_uri":                     upstream("    issuer: https://cluster.example.org\n    jwks_uri: http://cluster.example.org/jwks\n    shared: false\n" + rule),
+		"two key sources":                   upstream("    issuer: https://cluster.example.org\n    jwks_file: a.json\n    discovery: true\n    shared: false\n" + rule),
+		"no key source":                     upstream("    issuer: https://cluster.example.org\n    shared: false\n" + rule),
+		"bearer token with a file":          upstream("    issuer: https://cluster.example.org\n    jwks_file: a.json\n    bearer_token_file: t\n" + rule),
+		"negative lifetime":                 upstream("    issuer: https://cluster.example.org\n    jwks_file: a.json\n    max_token_lifetime: -1h\n" + rule),
+		"template outside the trust domain": upstream("    issuer: https://cluster.example.org\n    jwks_file: a.json\n    rules:\n      - spiffe_id: spiffe://other.org/{sub}\n"),
+	}
+	for name, doc := range bad {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Parse([]byte(doc), t.TempDir())
+			if err == nil {
+				_, err = exchangeFor(cfg)
+			}
+			if err == nil {
+				t.Fatal("want an error")
+			}
+		})
+	}
+}
+
+// exchangeFor builds the exchanger the issuer would, so template errors
+// surface in configuration tests.
+func exchangeFor(cfg *Loaded) (*exchange.Exchanger, error) {
+	return exchange.New(cfg.TrustDomain, cfg.Issuer, cfg.Upstreams, nil)
 }

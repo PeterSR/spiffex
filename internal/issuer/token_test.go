@@ -1,6 +1,7 @@
 package issuer
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -10,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +26,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
+	"github.com/PeterSR/spiffex/internal/exchange"
 	"github.com/PeterSR/spiffex/internal/keyset"
 )
 
@@ -393,5 +396,72 @@ func TestReplayCache(t *testing.T) {
 	}
 	if !c.use("modest", "1", exp, now) {
 		t.Error("one client's full cache locked out another client")
+	}
+}
+
+type fakeExchanger map[string]error
+
+func (f fakeExchanger) Exchange(_ context.Context, token string) (spiffeid.ID, error) {
+	if err, ok := f[token]; ok {
+		return spiffeid.ID{}, err
+	}
+	return spiffeid.RequireFromPath(td, "/ns/shop/sa/"+token), nil
+}
+
+func TestTokenExchange(t *testing.T) {
+	f := newTokenFixture(t)
+	f.iss.cfg.Exchanger = fakeExchanger{
+		"forged": fmt.Errorf("%w: bad signature", exchange.ErrRejected),
+		"broken": errors.New("upstream keys unavailable"),
+	}
+	form := func(token string, mutate ...func(url.Values)) url.Values {
+		v := url.Values{
+			"grant_type":         {GrantTokenExchange},
+			"subject_token":      {token},
+			"subject_token_type": {TokenTypeJWT},
+			"audience":           {"orders"},
+		}
+		for _, m := range mutate {
+			m(v)
+		}
+		return v
+	}
+
+	resp := f.post(t, form("billing"))
+	if resp.status != http.StatusOK || resp.body["spiffe_id"] != "spiffe://example.org/ns/shop/sa/billing" {
+		t.Fatalf("status %d: %v", resp.status, resp.body)
+	}
+	if resp := f.post(t, form("billing", func(v url.Values) { v.Set("subject_token_type", TokenTypeIDToken) })); resp.status != http.StatusOK {
+		t.Errorf("id_token type: status %d: %v", resp.status, resp.body)
+	}
+
+	cases := []struct {
+		name   string
+		form   url.Values
+		status int
+		code   string
+	}{
+		{"rejected token", form("forged"), 400, "invalid_request"},
+		{"exchanger failure", form("broken"), 500, "server_error"},
+		{"missing token", form(""), 400, "invalid_request"},
+		{"other token type", form("billing", func(v url.Values) { v.Set("subject_token_type", "urn:ietf:params:oauth:token-type:access_token") }), 400, "invalid_request"},
+		{"other requested type", form("billing", func(v url.Values) { v.Set("requested_token_type", "urn:ietf:params:oauth:token-type:access_token") }), 400, "invalid_request"},
+		{"issuer as audience", form("billing", func(v url.Values) { v.Set("audience", f.iss.URL()) }), 400, "invalid_target"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := f.post(t, c.form)
+			if resp.status != c.status || resp.body["error"] != c.code {
+				t.Errorf("status %d, body %v; want %d %s", resp.status, resp.body, c.status, c.code)
+			}
+			if c.code == "invalid_request" && strings.Contains(fmt.Sprint(resp.body["error_description"]), "signature") {
+				t.Error("the rejection reason leaked to the caller")
+			}
+		})
+	}
+
+	f.iss.cfg.Exchanger = nil
+	if resp := f.post(t, form("billing")); resp.body["error"] != "unsupported_grant_type" {
+		t.Errorf("without an exchanger: %v", resp.body)
 	}
 }

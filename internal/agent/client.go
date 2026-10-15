@@ -58,6 +58,17 @@ func (e *RejectedError) Error() string {
 	return "issuer refused the request: " + e.Code + ": " + e.Description
 }
 
+// ConfigError means the issuer answered, but not as the agent was told to
+// expect: retrying will not help.
+type ConfigError struct{ Err error }
+
+func (e *ConfigError) Error() string { return e.Err.Error() }
+func (e *ConfigError) Unwrap() error { return e.Err }
+
+func configErrorf(format string, args ...any) error {
+	return &ConfigError{fmt.Errorf(format, args...)}
+}
+
 // CredentialError is a failure to produce the workload's proof of identity
 // locally, before anything was sent to the issuer.
 type CredentialError struct{ Err error }
@@ -74,7 +85,7 @@ func (e *CredentialError) Unwrap() error { return e.Err }
 // own endpoints.
 func Discover(ctx context.Context, issuerURL string, trustDomain spiffeid.TrustDomain, httpClient *http.Client) (*IssuerClient, error) {
 	if err := checkIssuerURL(issuerURL); err != nil {
-		return nil, err
+		return nil, &ConfigError{err}
 	}
 	var client http.Client
 	if httpClient != nil {
@@ -92,19 +103,19 @@ func Discover(ctx context.Context, issuerURL string, trustDomain spiffeid.TrustD
 		return nil, fmt.Errorf("discovery: %w", err)
 	}
 	if doc.Issuer != issuerURL {
-		return nil, fmt.Errorf("discovery: issuer %q does not match the configured %q", doc.Issuer, issuerURL)
+		return nil, configErrorf("discovery: issuer %q does not match the configured %q", doc.Issuer, issuerURL)
 	}
 	for _, endpoint := range []string{doc.TokenEndpoint, doc.BundleEndpoint} {
 		if !strings.HasPrefix(endpoint, issuerURL+"/") {
-			return nil, fmt.Errorf("discovery: endpoint %q is not under the issuer URL", endpoint)
+			return nil, configErrorf("discovery: endpoint %q is not under the issuer URL", endpoint)
 		}
 	}
 	announced, err := spiffeid.TrustDomainFromString(doc.TrustDomain)
 	if err != nil {
-		return nil, fmt.Errorf("discovery: spiffe_trust_domain: %w", err)
+		return nil, configErrorf("discovery: spiffe_trust_domain: %w", err)
 	}
 	if !trustDomain.IsZero() && trustDomain != announced {
-		return nil, fmt.Errorf("discovery: issuer serves trust domain %s, configured %s", announced, trustDomain)
+		return nil, configErrorf("discovery: issuer serves trust domain %s, configured %s", announced, trustDomain)
 	}
 	return &IssuerClient{
 		issuerURL:      issuerURL,
@@ -255,7 +266,10 @@ func getJSON(ctx context.Context, client *http.Client, rawURL string, v any) err
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	switch {
+	case resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests:
+		return configErrorf("GET %s: %s", rawURL, resp.Status)
+	case resp.StatusCode != http.StatusOK:
 		return fmt.Errorf("GET %s: %s", rawURL, resp.Status)
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(v)

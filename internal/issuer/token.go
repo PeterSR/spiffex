@@ -1,6 +1,7 @@
 package issuer
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -21,6 +22,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
+
+	"github.com/PeterSR/spiffex/internal/exchange"
 )
 
 // OAuth 2.0 identifiers used on the token endpoint.
@@ -56,6 +59,13 @@ type Client struct {
 	PublicKeys []crypto.PublicKey
 	// Audiences, when non-empty, is the only audiences the client may request.
 	Audiences []string
+}
+
+// Exchanger verifies subject tokens for the token exchange grant and maps
+// them to SPIFFE IDs. An error wrapping exchange.ErrRejected means the token
+// is not acceptable.
+type Exchanger interface {
+	Exchange(ctx context.Context, subjectToken string) (spiffeid.ID, error)
 }
 
 // ClientSource looks up registered clients. It is consulted on every request,
@@ -110,7 +120,9 @@ func (iss *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var oe *oauthError
 		if !errors.As(err, &oe) {
-			iss.cfg.Logger.Error("token request failed", "error", err)
+			if iss.errorLog.allow(iss.cfg.Now()) {
+				iss.cfg.Logger.Error("token request failed", "error", err)
+			}
 			oe = &oauthError{http.StatusInternalServerError, "server_error", ""}
 		}
 		writeJSON(w, oe.status, oe, "no-store")
@@ -170,11 +182,52 @@ func (iss *Issuer) authorizeTokenRequest(r *http.Request) (spiffeid.ID, []string
 			return spiffeid.ID{}, nil, err
 		}
 		return client.SPIFFEID, audiences, nil
+	case GrantTokenExchange:
+		if iss.cfg.Exchanger == nil {
+			return spiffeid.ID{}, nil, &oauthError{http.StatusBadRequest, "unsupported_grant_type", ""}
+		}
+		id, err := iss.exchange(r, form)
+		if err != nil {
+			return spiffeid.ID{}, nil, err
+		}
+		audiences, err := iss.checkAudiences(form["audience"])
+		if err != nil {
+			return spiffeid.ID{}, nil, err
+		}
+		return id, audiences, nil
 	case "":
 		return spiffeid.ID{}, nil, errInvalidRequest("grant_type is required")
 	default:
 		return spiffeid.ID{}, nil, &oauthError{http.StatusBadRequest, "unsupported_grant_type", ""}
 	}
+}
+
+// exchange verifies an RFC 8693 subject token (SPEC section 3.3).
+func (iss *Issuer) exchange(r *http.Request, form url.Values) (spiffeid.ID, error) {
+	switch form.Get("subject_token_type") {
+	case TokenTypeJWT, TokenTypeIDToken:
+	default:
+		return spiffeid.ID{}, errInvalidRequest("subject_token_type must be %s or %s", TokenTypeJWT, TokenTypeIDToken)
+	}
+	if rt := form.Get("requested_token_type"); rt != "" && rt != TokenTypeJWT {
+		return spiffeid.ID{}, errInvalidRequest("requested_token_type must be %s", TokenTypeJWT)
+	}
+	token := form.Get("subject_token")
+	if token == "" {
+		return spiffeid.ID{}, errInvalidRequest("subject_token is required")
+	}
+	id, err := iss.cfg.Exchanger.Exchange(r.Context(), token)
+	if errors.Is(err, exchange.ErrRejected) {
+		// The reason stays in the log; the caller learns only that it failed.
+		if iss.rejectLog.allow(iss.cfg.Now()) {
+			iss.cfg.Logger.Info("subject token rejected", "reason", err)
+		}
+		return spiffeid.ID{}, errInvalidRequest("subject token rejected")
+	}
+	if err != nil {
+		return spiffeid.ID{}, err
+	}
+	return id, nil
 }
 
 // singleValued rejects any repeated parameter except the two that may repeat.

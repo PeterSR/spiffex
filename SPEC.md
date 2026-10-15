@@ -218,11 +218,15 @@ The issuer MUST:
    discovery location, never from a location named by the token.
 2. Reject a subject token whose `iss` is its own issuer URL.
 3. Verify the signature with an asymmetric algorithm consistent with the key (no `none`, no HMAC).
-4. Require `exp`, and check `exp` and `nbf`.
+4. Require `exp`, and check `exp` and `nbf`. It SHOULD also refuse tokens meant to live longer than
+   a configured maximum (`exp` minus `iat`), so that a long-lived token minted by hand is not a
+   standing credential.
 5. Check that `aud` contains the audience configured for that upstream.
 6. Map the token's claims to exactly one SPIFFE ID in its own trust domain, or reject it.
 
-When a mapping copies a claim value into the SPIFFE ID, that value fills exactly one path segment.
+When a mapping compares or copies a claim, only string values and integers count; integers are
+taken exactly as written in the token, and any other value is treated as absent. When a mapping
+copies a claim value into the SPIFFE ID, that value fills exactly one path segment.
 A value that is empty, is `.` or `..`, or contains any character outside `A-Z a-z 0-9 . _ -` MUST
 cause the request to be rejected; it is never escaped or rewritten. The resulting SPIFFE ID MUST
 NOT exceed 2048 bytes. Keeping it within 255 characters is RECOMMENDED, the limit AWS places on

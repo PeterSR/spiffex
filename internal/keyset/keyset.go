@@ -367,6 +367,9 @@ func Add(dir string, alg Algorithm, now time.Time) (Key, error) {
 		return Key{}, err
 	}
 	if err := os.Link(tmp.Name(), filepath.Join(dir, name)); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return Key{}, fmt.Errorf("%s already exists: key files are named by the second they were created in, so wait a second and try again", name)
+		}
 		return Key{}, err
 	}
 	if d, err := os.Open(dir); err == nil {
