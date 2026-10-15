@@ -66,6 +66,10 @@ func Load(path string) (*Loaded, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseFile(path, data)
+}
+
+func parseFile(path string, data []byte) (*Loaded, error) {
 	loaded, err := Parse(data, filepath.Dir(path))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)

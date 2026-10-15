@@ -20,11 +20,12 @@ const sweepInterval = time.Minute
 type replayCache struct {
 	mu        sync.Mutex
 	clients   map[string]map[string]time.Time
+	lastPrune map[string]time.Time
 	lastSweep time.Time
 }
 
 func newReplayCache() *replayCache {
-	return &replayCache{clients: make(map[string]map[string]time.Time)}
+	return &replayCache{clients: make(map[string]map[string]time.Time), lastPrune: make(map[string]time.Time)}
 }
 
 // use records jti for client until expires and reports whether it was unused
@@ -45,6 +46,12 @@ func (c *replayCache) use(client, jti string, expires, now time.Time) bool {
 		return false
 	}
 	if len(seen) >= maxReplayEntriesPerClient {
+		// Pruning a full client costs a scan under the lock, so do it at
+		// most once a second per client.
+		if now.Sub(c.lastPrune[client]) < time.Second {
+			return false
+		}
+		c.lastPrune[client] = now
 		for id, until := range seen {
 			if !now.Before(until) {
 				delete(seen, id)
@@ -67,6 +74,7 @@ func (c *replayCache) sweep(now time.Time) {
 		}
 		if len(seen) == 0 {
 			delete(c.clients, client)
+			delete(c.lastPrune, client)
 		}
 	}
 }

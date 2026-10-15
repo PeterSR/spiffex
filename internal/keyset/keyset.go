@@ -73,7 +73,9 @@ func (k Key) Public() jose.JSONWebKey {
 	}
 }
 
-// Set is an immutable set of keys, ordered by publication time, oldest first.
+// Set is an immutable set of keys, ordered by creation time, oldest first.
+// Creation order decides which key is newest; publication time only decides
+// when a key may start signing.
 type Set struct {
 	keys []Key
 }
@@ -84,11 +86,11 @@ func NewSet(keys []Key) (*Set, error) {
 		return nil, errors.New("key set is empty")
 	}
 	sorted := append([]Key(nil), keys...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		if !sorted[i].Published.Equal(sorted[j].Published) {
-			return sorted[i].Published.Before(sorted[j].Published)
+	sort.Slice(sorted, func(i, j int) bool {
+		if !sorted[i].Created.Equal(sorted[j].Created) {
+			return sorted[i].Created.Before(sorted[j].Created)
 		}
-		return sorted[i].Created.Before(sorted[j].Created)
+		return sorted[i].ID < sorted[j].ID
 	})
 	seen := make(map[string]string, len(sorted))
 	for _, k := range sorted {
@@ -110,45 +112,50 @@ func (s *Set) Keys() []Key {
 //
 // When no key qualifies, every key looks recently published. That happens
 // when something rewrote all the key files at once (a Kubernetes Secret
-// update does), and in a freshly created trust domain. Active then trusts the
-// creation times in the file names and returns the newest key created at
-// least activationDelay ago, which after a rewrite is the key that was
-// signing before it; failing that, the oldest key.
+// update does) and the process then restarted, and in a freshly created trust
+// domain. Active then trusts the creation times in the file names and returns
+// the newest key created at least activationDelay ago, which after a rewrite
+// is the key that was signing before it; failing that, the oldest key.
 func (s *Set) Active(now time.Time, activationDelay time.Duration) Key {
 	for i := len(s.keys) - 1; i >= 0; i-- {
-		if !s.keys[i].Published.Add(activationDelay).After(now) {
+		if s.keys[i].activated(now, activationDelay) {
 			return s.keys[i]
 		}
 	}
-	var best *Key
-	oldest := &s.keys[0]
-	for i := range s.keys {
-		k := &s.keys[i]
-		if k.Created.Before(oldest.Created) {
-			oldest = k
-		}
-		if !k.Created.Add(activationDelay).After(now) && (best == nil || k.Created.After(best.Created)) {
-			best = k
+	for i := len(s.keys) - 1; i >= 0; i-- {
+		if !s.keys[i].Created.Add(activationDelay).After(now) {
+			return s.keys[i]
 		}
 	}
-	if best != nil {
-		return *best
-	}
-	return *oldest
+	return s.keys[0]
+}
+
+func (k Key) activated(now time.Time, activationDelay time.Duration) bool {
+	return !k.Published.Add(activationDelay).After(now)
 }
 
 // Retired returns the keys no verifier can need any more: keys the issuer
-// stopped signing with at least retention ago. Retention should cover the
-// longest token lifetime plus clock skew and the time it takes every issuer
-// process to see a new key. The active key and anything newer are never
-// retired.
+// stopped signing with at least retention ago. A key stops signing when a
+// newer key activates. Retention should cover the longest token lifetime plus
+// clock skew and the time it takes every issuer process to see a new key.
+// The active key and anything newer are never retired.
 func (s *Set) Retired(now time.Time, activationDelay, retention time.Duration) []Key {
+	active := s.Active(now, activationDelay)
 	var retired []Key
-	for i := 0; i < len(s.keys)-1; i++ {
-		// Key i stops signing when its successor activates.
-		successorActive := s.keys[i+1].Published.Add(activationDelay)
-		if !successorActive.Add(retention).After(now) {
-			retired = append(retired, s.keys[i])
+	for i, k := range s.keys {
+		if k.ID == active.ID || !k.Created.Before(active.Created) {
+			break
+		}
+		// The earliest moment a newer key could have taken over from k.
+		var replaced time.Time
+		for _, newer := range s.keys[i+1:] {
+			at := newer.Published.Add(activationDelay)
+			if replaced.IsZero() || at.Before(replaced) {
+				replaced = at
+			}
+		}
+		if !replaced.Add(retention).After(now) {
+			retired = append(retired, k)
 		}
 	}
 	return retired

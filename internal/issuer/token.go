@@ -13,7 +13,10 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
+	"sync"
 	"time"
+	"unicode"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -68,6 +71,8 @@ func ValidateAudience(s string) error {
 		return errors.New("audience must not be empty")
 	case len(s) > maxAudienceLength:
 		return fmt.Errorf("audience is longer than %d bytes", maxAudienceLength)
+	case strings.ContainsFunc(s, unicode.IsControl):
+		return errors.New("audience must not contain control characters")
 	}
 	return nil
 }
@@ -223,7 +228,7 @@ func (iss *Issuer) authenticateClient(form url.Values) (Client, error) {
 	if !ok {
 		// Spend the same effort as for a known client, so response times do
 		// not reveal which client ids exist.
-		keys = []crypto.PublicKey{decoyKeys[assertion.Headers[0].Algorithm]}
+		keys = []crypto.PublicKey{decoyKeys()[assertion.Headers[0].Algorithm]}
 	}
 	var claims jwt.Claims
 	if !verifyWithAny(assertion, keys, &claims) || !ok {
@@ -244,7 +249,7 @@ func (iss *Issuer) authenticateClient(form url.Values) (Client, error) {
 
 // decoyKeys has one key per accepted algorithm, so verifying an unknown
 // client's assertion costs what verifying a known client's would.
-var decoyKeys = func() map[string]crypto.PublicKey {
+var decoyKeys = sync.OnceValue(func() map[string]crypto.PublicKey {
 	ec, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		panic(err)
@@ -254,7 +259,7 @@ var decoyKeys = func() map[string]crypto.PublicKey {
 		panic(err)
 	}
 	return map[string]crypto.PublicKey{string(jose.ES256): &ec.PublicKey, string(jose.RS256): &rsaKey.PublicKey}
-}()
+})
 
 func verifyWithAny(assertion *jwt.JSONWebToken, keys []crypto.PublicKey, claims *jwt.Claims) bool {
 	for _, key := range keys {

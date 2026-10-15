@@ -334,3 +334,39 @@ func TestPruneKeepsKeyWhileBackdatedSuccessorActivates(t *testing.T) {
 		t.Fatalf("Prune removed %v after the successor's activation plus retention, want the old key", removed)
 	}
 }
+
+// A Secret update writes key files in no particular order. The newest key by
+// name must stay the newest, whichever file was written last.
+func TestOrderFollowsCreationNotModificationTime(t *testing.T) {
+	dir := t.TempDir()
+	older, err := Add(dir, ES256, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := Add(dir, ES256, t0.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewrite := t0.Add(72 * time.Hour)
+	if err := os.Chtimes(filepath.Join(dir, newer.File), rewrite, rewrite); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, older.File), rewrite.Add(time.Millisecond), rewrite.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	set, err := LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delay := time.Hour
+	for _, now := range []time.Time{rewrite, rewrite.Add(2 * delay)} {
+		if got := set.Active(now, delay); got.ID != newer.ID {
+			t.Errorf("at %s: signing with %s, want the newer key", now, got.File)
+		}
+		for _, k := range set.Retired(now, delay, 10*time.Minute) {
+			if k.ID == newer.ID {
+				t.Errorf("at %s: the newer key is retired", now)
+			}
+		}
+	}
+}
