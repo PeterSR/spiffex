@@ -105,7 +105,8 @@ Rotation MUST NOT break a verifier that refreshes on the published hint:
    lifetime after its last use, plus an allowance for clock skew.
 
 Whenever more than one published key has completed its activation delay, the issuer signs with the
-newest. When no published key has (a newly created trust domain), it signs with the oldest.
+newest. When none has, as in a newly created trust domain, it signs with the key it would have
+used had it been running all along, or else with the oldest key.
 
 A compromised key is the exception to rule 2: the operator removes it at once, accepting that
 tokens it signed stop verifying.
