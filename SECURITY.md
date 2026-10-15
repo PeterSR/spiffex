@@ -10,15 +10,15 @@ vulnerability*. If that form is unavailable, use the contact options on the main
 [GitHub profile](https://github.com/PeterSR) to arrange a private channel. Do not open a public
 issue for anything you believe is a security problem.
 
-You can expect an acknowledgement within a few days. A reproduction helps most: a request the
-issuer should have refused, or a token a verifier should have rejected.
+You can expect an acknowledgement within a few days. A reproduction helps most: a request the issuer
+should have refused, or a token a verifier should have rejected.
 
 ## Scope
 
 In scope:
 
-- the issuer: client assertion and token exchange verification, the mapping of proofs to SPIFFE
-  IDs, signing key handling and rotation;
+- the issuer: client assertion and token exchange verification, the mapping of proofs to SPIFFE IDs,
+  signing key handling and rotation;
 - the agent: the Workload API surface, token caching, bundle handling;
 - the specification in [SPEC.md](SPEC.md).
 

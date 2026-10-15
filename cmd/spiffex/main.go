@@ -42,15 +42,19 @@ func main() {
 			return
 		}
 		fmt.Fprintln(os.Stderr, "spiffex:", err)
-		os.Exit(2)
+		var usage usageError
+		if errors.As(err, &usage) {
+			os.Exit(2)
+		}
+		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, args []string, stderr io.Writer) error {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "-help" || args[0] == "--help" || args[0] == "help" {
 		usage(stderr)
 		if len(args) == 0 {
-			return errors.New("no command given")
+			return usageError{errors.New("no command given")}
 		}
 		return nil
 	}
@@ -60,8 +64,14 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		}
 	}
 	usage(stderr)
-	return fmt.Errorf("unknown command %q", args[0])
+	return usageError{fmt.Errorf("unknown command %q", args[0])}
 }
+
+// usageError is a mistake in how spiffex was invoked, as opposed to a failure
+// while running; it exits with status 2 instead of 1.
+type usageError struct{ error }
+
+func (e usageError) Unwrap() error { return e.error }
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: spiffex <command> [flags]")
@@ -104,10 +114,13 @@ func newFlagSet(name, synopsis string) *flag.FlagSet {
 // from its environment variable.
 func parseFlags(fs *flag.FlagSet, args []string) error {
 	if err := fs.Parse(args); err != nil {
-		return err
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		return usageError{err}
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		return usageError{fmt.Errorf("unexpected argument %q", fs.Arg(0))}
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })

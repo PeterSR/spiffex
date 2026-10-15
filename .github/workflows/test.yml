@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         # The oldest Go that go.mod allows, and the newest.
-        go: ["1.25", stable]
+        go: ["1.26", stable]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

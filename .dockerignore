@@ -1,2 +1,5 @@
-.git
-conformance/python/.venv
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/

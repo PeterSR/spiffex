@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"time"
 
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
@@ -22,6 +23,10 @@ func runHealth(ctx context.Context, args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
-	_, err := workloadapi.FetchJWTBundles(ctx, workloadapi.WithAddr("unix://"+*socket))
+	path, err := filepath.Abs(*socket)
+	if err != nil {
+		return err
+	}
+	_, err = workloadapi.FetchJWTBundles(ctx, workloadapi.WithAddr("unix://"+path))
 	return err
 }

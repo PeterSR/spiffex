@@ -93,6 +93,11 @@ func runIssuer(ctx context.Context, args []string) error {
 		}
 		srv.TLSConfig = &tls.Config{GetCertificate: certs.GetCertificate, MinVersion: tls.VersionTLS12}
 	}
+	if *tlsCert == "" {
+		if host, _, _ := net.SplitHostPort(*listen); !isLoopbackHost(host) {
+			logger.Warn("serving plain HTTP on a non-loopback address; put a TLS-terminating proxy in front, or use -tls-cert and -tls-key", "address", *listen)
+		}
+	}
 	logger.Info("issuer listening", "address", l.Addr().String(), "tls", *tlsCert != "", "issuer", iss.URL(),
 		"trust_domain", iss.TrustDomain().Name(), "clients", len(cfg.Clients), "upstreams", len(cfg.Upstreams))
 	errc := make(chan error, 1)
@@ -111,4 +116,9 @@ func runIssuer(ctx context.Context, args []string) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+func isLoopbackHost(host string) bool {
+	ip := net.ParseIP(host)
+	return host == "localhost" || ip != nil && ip.IsLoopback()
 }

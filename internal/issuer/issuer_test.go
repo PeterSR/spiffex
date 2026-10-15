@@ -187,7 +187,7 @@ func TestValidateURL(t *testing.T) {
 	good := []string{"https://issuer.example.org", "https://example.org/spiffex", "http://127.0.0.1:8443"}
 	bad := []string{"", "issuer.example.org", "ftp://example.org", "https://example.org/", "https://example.org?x=1",
 		"https://example.org#f", "https://u:p@example.org", "https://example.org/{a}", "https://example.org/a/../b",
-		"https://example.org/a b", "HTTPS://example.org"}
+		"https://example.org/a b", "HTTPS://example.org", "http://issuer.example.org"}
 	for _, u := range good {
 		if _, err := ValidateURL(u); err != nil {
 			t.Errorf("ValidateURL(%q) = %v, want ok", u, err)

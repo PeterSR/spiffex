@@ -23,14 +23,14 @@ shown here.
 ```
 
 - The **issuer** is the trust domain's only signer. Verifiers see an OpenID Connect issuer in the
-  sense that federation needs: a discovery document and a JWKS that its tokens verify against. It
-  is not a full OpenID Provider; there is no authorization endpoint and no end user.
+  sense that federation needs: a discovery document and a JWKS that its tokens verify against. It is
+  not a full OpenID Provider; there is no authorization endpoint and no end user.
 - A **workload** is anything that needs an identity. It either talks to an agent through the
   Workload API, or speaks OAuth 2.0 to the issuer directly.
 - An **agent** acts for exactly one workload. It holds that workload's proof of identity, fetches
   JWT-SVIDs from the issuer and serves them over the Workload API.
-- A **verifier** checks JWT-SVIDs offline against the issuer's keys, fetched as a SPIFFE bundle,
-  as a JWKS, or through an agent.
+- A **verifier** checks JWT-SVIDs offline against the issuer's keys, fetched as a SPIFFE bundle, as
+  a JWKS, or through an agent.
 
 Terms from the SPIFFE standards ([SPIFFE-ID], [JWT-SVID], [Trust Domain and Bundle],
 [Workload API]) keep their meaning here.
@@ -50,7 +50,8 @@ them from the discovery document.
 `GET <issuer>/.well-known/openid-configuration` returns a JSON object with at least the fields
 below. The issuer also serves the same object as [RFC 8414] authorization server metadata: at
 `<issuer>/.well-known/oauth-authorization-server` when the issuer URL has no path, and with the
-well-known segment inserted after the host when it has one (`https://host/.well-known/oauth-authorization-server/path`).
+well-known segment inserted after the host when it has one
+(`https://host/.well-known/oauth-authorization-server/path`).
 
 | Field | Value |
 |---|---|
@@ -68,27 +69,27 @@ well-known segment inserted after the host when it has one (`https://host/.well-
 | `spiffe_trust_domain` | the trust domain name, e.g. `example.org`; informational |
 
 The two `spiffe_` fields are conveniences for humans and tooling. A SPIFFE federation peer MUST
-configure the trust domain and bundle endpoint URL out of band, as [SPIFFE Federation] requires,
-and MUST NOT take them from this document.
+configure the trust domain and bundle endpoint URL out of band, as [SPIFFE Federation] requires, and
+MUST NOT take them from this document.
 
 ### 2.2 JWKS
 
-`GET <issuer>/jwks` returns a JSON Web Key Set ([RFC 7517]) holding every key the issuer
-publishes: keys it signs with now, keys it will sign with after activation, and keys that signed
-tokens that may still be valid (section 2.4). Each key carries `kid`, `alg` and `use: "sig"`. This
-is the endpoint for OIDC consumers: cloud federation, API gateways, generic JWT libraries.
+`GET <issuer>/jwks` returns a JSON Web Key Set ([RFC 7517]) holding every key the issuer publishes:
+keys it signs with now, keys it will sign with after activation, and keys that signed tokens that
+may still be valid (section 2.4). Each key carries `kid`, `alg` and `use: "sig"`. This is the
+endpoint for OIDC consumers: cloud federation, API gateways, generic JWT libraries.
 
 ### 2.3 SPIFFE bundle
 
 `GET <issuer>/bundle` returns the trust domain's bundle in the format of the [Trust Domain and
 Bundle] standard: the same public keys as the JWKS, each with `use: "jwt-svid"` and `kid`, plus
-`spiffe_sequence` and `spiffe_refresh_hint` (seconds). It is a bundle endpoint with the
-`https_web` profile of [SPIFFE Federation].
+`spiffe_sequence` and `spiffe_refresh_hint` (seconds). It is a bundle endpoint with the `https_web`
+profile of [SPIFFE Federation].
 
 `spiffe_sequence` MUST increase whenever the published key set changes, as observed from any one
-issuer process. Processes serving the same issuer URL SHOULD report the same value for the same
-key set, but nothing guarantees it, so verifiers MUST NOT conclude from the sequence alone that a
-bundle from one process is older than a bundle from another.
+issuer process. Processes serving the same issuer URL SHOULD report the same value for the same key
+set, but nothing guarantees it, so verifiers MUST NOT conclude from the sequence alone that a bundle
+from one process is older than a bundle from another.
 
 ### 2.4 Signing keys and rotation
 
@@ -101,15 +102,15 @@ Rotation MUST NOT break a verifier that refreshes on the published hint:
    issuer signs with it. The delay is measured from when the issuer first publishes the key, not
    from when the key was generated. The activation delay SHOULD be at least three times the
    `spiffe_refresh_hint`, and the JWKS `Cache-Control` max-age MUST NOT exceed the refresh hint.
-2. A key the issuer stopped signing with stays published for at least the maximum JWT-SVID
-   lifetime after its last use, plus an allowance for clock skew.
+2. A key the issuer stopped signing with stays published for at least the maximum JWT-SVID lifetime
+   after its last use, plus an allowance for clock skew.
 
 Whenever more than one published key has completed its activation delay, the issuer signs with the
-newest. When none has, as in a newly created trust domain, it signs with the key it would have
-used had it been running all along, or else with the oldest key.
+newest. When none has, as in a newly created trust domain, it signs with the key it would have used
+had it been running all along, or else with the oldest key.
 
-A compromised key is the exception to rule 2: the operator removes it at once, accepting that
-tokens it signed stop verifying.
+A compromised key is the exception to rule 2: the operator removes it at once, accepting that tokens
+it signed stop verifying.
 
 ## 3. The token endpoint
 
@@ -123,16 +124,15 @@ credentials it is a spiffex extension with the same meaning.
 |---|---|
 | `audience` | REQUIRED, MAY repeat. Each distinct value becomes an `aud` entry of the JWT-SVID. At most 5 values, each non-empty and at most 512 bytes. A single audience is RECOMMENDED, as the [JWT-SVID] standard advises. |
 
-Parameters other than `audience` and `resource` MUST appear at most once. `scope` and `resource`
-are ignored. `actor_token`
-is rejected with `invalid_request`: spiffex does not issue delegation tokens.
+Parameters other than `audience` and `resource` MUST appear at most once. `scope` and `resource` are
+ignored. `actor_token` is rejected with `invalid_request`: spiffex does not issue delegation tokens.
 
 The issuer MUST reject, with `invalid_target`, an audience equal to its own issuer URL or token
-endpoint, so a JWT-SVID can never pass for a client assertion or exchange input aimed at the
-issuer itself.
+endpoint, so a JWT-SVID can never pass for a client assertion or exchange input aimed at the issuer
+itself.
 
-A successful response is `200` with `Content-Type: application/json`, `Cache-Control: no-store`
-and the body:
+A successful response is `200` with `Content-Type: application/json`, `Cache-Control: no-store` and
+the body:
 
 ```json
 {
@@ -159,16 +159,16 @@ Errors follow [RFC 6749] section 5.2: a JSON body with `error` and optionally `e
 | The caller authenticated, but may not request this audience | `invalid_target` | 400 |
 | Anything else | `server_error` | 500 |
 
-The issuer MUST finish authenticating the caller before it returns `invalid_target`, so the
-response does not reveal what a given client or token would be permitted. Authentication failures
-of one grant MUST be indistinguishable from each other in status and body: an unknown client and a
-bad signature get the same answer. Issuers SHOULD also keep their timing similar, for instance by
+The issuer MUST finish authenticating the caller before it returns `invalid_target`, so the response
+does not reveal what a given client or token would be permitted. Authentication failures of one
+grant MUST be indistinguishable from each other in status and body: an unknown client and a bad
+signature get the same answer. Issuers SHOULD also keep their timing similar, for instance by
 verifying an unknown client's assertion against a decoy key.
 
 ### 3.2 Client credentials with `private_key_jwt`
 
-The workload holds a private key; the issuer knows only the public half, registered against a
-client id and a SPIFFE ID.
+The workload holds a private key; the issuer knows only the public half, registered against a client
+id and a SPIFFE ID.
 
 | Parameter | |
 |---|---|
@@ -180,23 +180,23 @@ client id and a SPIFFE ID.
 The client assertion follows [RFC 7523] as updated by [RFC 7523bis]. The issuer MUST reject it
 unless all of the following hold, allowing 30 seconds of clock skew on every time comparison:
 
-- It is a JWS signed with ES256 or RS256 by a key registered for the client. Registered RSA keys
-  are at least 2048 bits.
+- It is a JWS signed with ES256 or RS256 by a key registered for the client. Registered RSA keys are
+  at least 2048 bits.
 - `iss` and `sub` both equal the client id.
-- `aud` is the issuer URL and nothing else, either as a string or as a one-element array. The
-  token endpoint URL is not accepted.
+- `aud` is the issuer URL and nothing else, either as a string or as a one-element array. The token
+  endpoint URL is not accepted.
 - `exp` is present, in the future, and no more than 5 minutes from now.
 - `iat`, if present, is not in the future; `nbf`, if present, has passed.
-- `jti` is present and the issuer has not accepted it from this client before. The issuer
-  remembers each `jti` until the assertion expires.
+- `jti` is present and the issuer has not accepted it from this client before. The issuer remembers
+  each `jti` until the assertion expires.
 
-Clients SHOULD set the JWS header `typ` to `client-authentication+jwt`. The issuer MUST NOT
-require it.
+Clients SHOULD set the JWS header `typ` to `client-authentication+jwt`. The issuer MUST NOT require
+it.
 
-An issuer running several processes without a shared replay store can only enforce `jti`
-uniqueness per process, so an intercepted assertion could be used once per process within its
-lifetime of at most 5 minutes. Such issuers SHOULD share the store, and MUST say so in their
-documentation if they do not.
+An issuer running several processes without a shared replay store can only enforce `jti` uniqueness
+per process, so an intercepted assertion could be used once per process within its lifetime of at
+most 5 minutes. Such issuers SHOULD share the store, and MUST say so in their documentation if they
+do not.
 
 ### 3.3 Token exchange
 
@@ -213,9 +213,9 @@ token. See [RFC 8693].
 
 The issuer MUST:
 
-1. Select the upstream by exact match of the subject token's `iss` against its configuration,
-   before fetching any key. It MUST fetch keys only from that upstream's configured JWKS or
-   discovery location, never from a location named by the token.
+1. Select the upstream by exact match of the subject token's `iss` against its configuration, before
+   fetching any key. It MUST fetch keys only from that upstream's configured JWKS or discovery
+   location, never from a location named by the token.
 2. Reject a subject token whose `iss` is its own issuer URL.
 3. Verify the signature with an asymmetric algorithm consistent with the key (no `none`, no HMAC).
 4. Require `exp`, and check `exp` and `nbf`. It SHOULD also refuse tokens meant to live longer than
@@ -224,13 +224,12 @@ The issuer MUST:
 5. Check that `aud` contains the audience configured for that upstream.
 6. Map the token's claims to exactly one SPIFFE ID in its own trust domain, or reject it.
 
-When a mapping compares or copies a claim, only string values and integers count; integers are
-taken exactly as written in the token, and any other value is treated as absent. When a mapping
-copies a claim value into the SPIFFE ID, that value fills exactly one path segment.
-A value that is empty, is `.` or `..`, or contains any character outside `A-Z a-z 0-9 . _ -` MUST
-cause the request to be rejected; it is never escaped or rewritten. The resulting SPIFFE ID MUST
-NOT exceed 2048 bytes. Keeping it within 255 characters is RECOMMENDED, the limit AWS places on
-federated subjects.
+When a mapping compares or copies a claim, only string values and integers count; integers are taken
+exactly as written in the token, and any other value is treated as absent. When a mapping copies a
+claim value into the SPIFFE ID, that value fills exactly one path segment. A value that is empty, is
+`.` or `..`, or contains any character outside `A-Z a-z 0-9 . _ -` MUST cause the request to be
+rejected; it is never escaped or rewritten. The resulting SPIFFE ID MUST NOT exceed 2048 bytes.
+Keeping it within 255 characters is RECOMMENDED, the limit AWS places on federated subjects.
 
 ## 4. The JWT-SVID
 
@@ -241,9 +240,8 @@ The issued token is a JWT-SVID as defined by [JWT-SVID]:
   requested, otherwise an array), `exp`, `iat`, `jti`. No other claims.
 
 The lifetime is chosen by the issuer and SHOULD be a few minutes. Verifiers MUST check the
-signature, `exp`, that `aud` contains their own expected audience, and that `sub` is a valid
-SPIFFE ID in the trust domain the key belongs to. Verifiers that know the issuer URL SHOULD check
-`iss`.
+signature, `exp`, that `aud` contains their own expected audience, and that `sub` is a valid SPIFFE
+ID in the trust domain the key belongs to. Verifiers that know the issuer URL SHOULD check `iss`.
 
 ## 5. The agent
 
@@ -252,9 +250,9 @@ It MUST NOT listen on TCP: it performs no attestation, so whoever reaches the en
 identity. Workloads find it through `SPIFFE_ENDPOINT_SOCKET=unix:///path/to/socket`.
 
 The agent implements the JWT-SVID profile only, so it is not a complete Workload API server: the
-standard makes the X.509-SVID profile mandatory. Workloads use the JWT parts of their SPIFFE
-library (for go-spiffe, `workloadapi.NewJWTSource`, `FetchJWTSVID`, `ValidateJWTSVID`) and not the
-X.509 or combined bundle sources, which retry `Unimplemented` until their deadline.
+standard makes the X.509-SVID profile mandatory. Workloads use the JWT parts of their SPIFFE library
+(for go-spiffe, `workloadapi.NewJWTSource`, `FetchJWTSVID`, `ValidateJWTSVID`) and not the X.509 or
+combined bundle sources, which retry `Unimplemented` until their deadline.
 
 | RPC | Behaviour |
 |---|---|
@@ -272,10 +270,11 @@ The agent's gRPC status codes:
 | `ValidateJWTSVID` given a token that does not validate | `InvalidArgument` |
 | The issuer refused the request (`invalid_client`, `invalid_request`, `invalid_target`, `unsupported_grant_type`) | `PermissionDenied` |
 | The issuer is unreachable or failed, or no bundle has been fetched yet | `Unavailable` |
+| The agent cannot produce its own proof of identity (an unreadable key or subject token file) | `FailedPrecondition` |
 
-An agent supports both grants of section 3 and is configured to use one. It SHOULD reuse a
-JWT-SVID for the same audiences until half its lifetime has passed, and SHOULD refresh the bundle
-at the issuer's `spiffe_refresh_hint`.
+An agent supports both grants of section 3 and is configured to use one. It SHOULD reuse a JWT-SVID
+for the same audiences until half its lifetime has passed, and SHOULD refresh the bundle at the
+issuer's `spiffe_refresh_hint`.
 
 Deployments MUST restrict access to the socket: file permissions, or a volume shared only with the
 workload's own containers.
@@ -290,8 +289,8 @@ workload's own containers.
   does not let anyone impersonate a workload.
 - **JWT-SVIDs are bearer tokens.** Anyone holding one can use it against its audiences until it
   expires. Keep lifetimes short, request narrow audiences, and send them only over TLS.
-- **Audience is the receiver's job to check.** An issuer may restrict which audiences a workload
-  may request, but a receiver MUST still check `aud` itself.
+- **Audience is the receiver's job to check.** An issuer may restrict which audiences a workload may
+  request, but a receiver MUST still check `aud` itself.
 - **Upstream trust is delegated trust.** Trusting an upstream means trusting everyone who can get a
   token from it with the configured audience. For a shared upstream (a public CI provider, a cloud
   provider's global issuer) anyone can obtain such a token, so the `aud` check proves nothing about
@@ -304,9 +303,9 @@ workload's own containers.
 
 AWS IAM accepts the issuer as an OIDC identity provider when the issuer URL has no port and no
 trailing slash, the JWKS is served with a certificate from a publicly trusted CA, and tokens carry
-`iat` and a SPIFFE ID of at most 255 characters. The token's `aud` must match a client ID
-registered on the provider; requesting that single audience is RECOMMENDED. Trust policies then
-condition on `<issuer URL without https://>:sub` and `<issuer URL without https://>:aud`.
+`iat` and a SPIFFE ID of at most 255 characters. The token's `aud` must match a client ID registered
+on the provider; requesting that single audience is RECOMMENDED. Trust policies then condition on
+`<issuer URL without https://>:sub` and `<issuer URL without https://>:aud`.
 
 [SPIFFE-ID]: https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE-ID.md
 [JWT-SVID]: https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md

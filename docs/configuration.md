@@ -40,13 +40,12 @@ so a file caught halfway through being written is not mistaken for the new confi
 replace the file atomically (write a new file and rename it over the old one, as a Kubernetes
 ConfigMap update does) where you can. A change to `upstreams` takes effect at the next restart,
 while client changes in the same edit apply at once. The other settings need a restart; a reload
-that changes them is refused and logged. The TLS certificate is reloaded when its files
-change.
+that changes them is refused and logged. The TLS certificate is reloaded when its files change.
 
 Every flag of every command can also be set as an environment variable: `-reload-interval` is
-`SPIFFEX_RELOAD_INTERVAL`, and so on. The names are shared between commands, so `SPIFFEX_DIR`
-means `-dir` to every command that has one. A repeatable flag such as `-audience` takes a single
-value from the environment.
+`SPIFFEX_RELOAD_INTERVAL`, and so on. The names are shared between commands, so `SPIFFEX_DIR` means
+`-dir` to every command that has one. A repeatable flag such as `-audience` takes a single value
+from the environment.
 
 ## Registering a workload
 
@@ -57,15 +56,14 @@ spiffex key generate -out billing.key > billing.pub
 `billing.key` stays with the workload and nowhere else. `billing.pub` goes into the issuer's
 configuration. `-alg RS256` makes an RSA key instead of the default ECDSA P-256 key.
 
-A workload can have several public keys registered at once, which is how its key is rotated: add
-the new public key, switch the workload to the new private key, then remove the old public key.
+A workload can have several public keys registered at once, which is how its key is rotated: add the
+new public key, switch the workload to the new private key, then remove the old public key.
 
 ## Token exchange
 
-An upstream lets workloads trade a token they already have for a JWT-SVID, with no key of their
-own registered at the issuer. The issuer verifies the token against the upstream's keys, then
-tries the rules in order; the first whose `match` claims all have the given values decides the
-SPIFFE ID.
+An upstream lets workloads trade a token they already have for a JWT-SVID, with no key of their own
+registered at the issuer. The issuer verifies the token against the upstream's keys, then tries the
+rules in order; the first whose `match` claims all have the given values decides the SPIFFE ID.
 
 | Field | |
 |---|---|
@@ -86,9 +84,9 @@ one the token's holder chooses, like a branch name.
 Claims inside objects are named by their path with `/`, so `kubernetes.io/namespace` is the
 `namespace` field of the `kubernetes.io` object. In `spiffe_id`, `{path}` is replaced by that
 claim's value. A placeholder must fill a whole path segment, and a token whose value for it is
-empty, `.`, `..`, or contains anything but letters, digits, `.`, `_` and `-` is refused rather
-than escaped, so no two tokens can map to the same identity by way of a crafted value. Only string
-and integer claims count, integers exactly as the token writes them; a claim holding a fraction, a
+empty, `.`, `..`, or contains anything but letters, digits, `.`, `_` and `-` is refused rather than
+escaped, so no two tokens can map to the same identity by way of a crafted value. Only string and
+integer claims count, integers exactly as the token writes them; a claim holding a fraction, a
 boolean, an object or a list is treated as absent.
 
 Two upstreams whose rules produce the same SPIFFE IDs (two clusters with the same namespace and
@@ -126,9 +124,9 @@ container startup or readiness probe.
 The agent retries discovery until the issuer answers, and exits when the answer shows it was
 misconfigured (a different issuer URL or trust domain).
 
-Workloads find the agent through `SPIFFE_ENDPOINT_SOCKET=unix:///run/spiffex/billing.sock`.
-Anyone who can connect to the socket gets the workload's identity, so keep it private to the
-workload: a directory only its user can enter, or a volume shared only between its containers.
+Workloads find the agent through `SPIFFE_ENDPOINT_SOCKET=unix:///run/spiffex/billing.sock`. Anyone
+who can connect to the socket gets the workload's identity, so keep it private to the workload: a
+directory only its user can enter, or a volume shared only between its containers.
 
 Use your SPIFFE library's JWT parts. The agent does not serve X.509-SVIDs, and the X.509 and
 combined bundle sources of go-spiffe and py-spiffe wait for them until they time out.
@@ -152,19 +150,20 @@ directory every few minutes or more often.
 
 The activation delay gives verifiers time to fetch a new key before tokens signed with it appear.
 The issuer counts it from when a key arrived in its directory, not from the time in its file name,
-so copying in a key generated elsewhere is safe, as long as the copy gets a fresh modification
-time (a plain `cp`, not `cp -p` or `rsync -t`) or no issuer process restarts during the delay. Keep the delay at least three times the bundle
-refresh hint (a fifth of the delay by default).
+so copying in a key generated elsewhere is safe, as long as the copy gets a fresh modification time
+(a plain `cp`, not `cp -p` or `rsync -t`) or no issuer process restarts during the delay. Keep the
+delay at least three times the bundle refresh hint (a fifth of the delay by default).
 
 **Run `list` and `prune` against the directory the issuer reads, or a copy that is exactly as old.**
-They judge from the files in front of them. If you keep the keys somewhere else and deploy them
-(a Secret built from a local directory, say), the local copy does not know when the deployment
-happened: after `key add`, deploy, wait the activation delay plus the token TTL plus ten minutes, and only then prune
-and deploy again. Pruning the local copy early can delete the key the issuer is signing with.
+They judge from the files in front of them. If you keep the keys somewhere else and deploy them (a
+Secret built from a local directory, say), the local copy does not know when the deployment
+happened: after `key add`, deploy, wait the activation delay plus the token TTL plus ten minutes,
+and only then prune and deploy again. Pruning the local copy early can delete the key the issuer is
+signing with.
 
 If a signing key is compromised, delete its file at once and accept that tokens it signed stop
 verifying.
 
 When the keys directory is a Kubernetes Secret, keep the key files under their own names in the
-Secret and update the Secret as a whole; the issuer treats a rewrite of files it already knows as
-no change.
+Secret and update the Secret as a whole; the issuer treats a rewrite of files it already knows as no
+change.

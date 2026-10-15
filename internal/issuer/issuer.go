@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -119,6 +120,9 @@ func New(cfg Config) (*Issuer, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	// Made now rather than on first use, so the first unknown client is
+	// answered as fast as every later one.
+	decoyKeys()
 	return &Issuer{cfg: cfg, basePath: u.Path, replay: newReplayCache()}, nil
 }
 
@@ -131,6 +135,8 @@ func ValidateURL(raw string) (*url.URL, error) {
 	switch {
 	case u.Scheme != "https" && u.Scheme != "http":
 		return nil, fmt.Errorf("issuer URL %q: scheme must be https (or http for local development)", raw)
+	case u.Scheme == "http" && !isLoopback(u.Hostname()):
+		return nil, fmt.Errorf("issuer URL %q: plain http is only allowed on a loopback address", raw)
 	case u.Host == "":
 		return nil, fmt.Errorf("issuer URL %q: host is required", raw)
 	case u.RawQuery != "" || u.Fragment != "" || u.User != nil || u.Opaque != "":
@@ -143,6 +149,11 @@ func ValidateURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("issuer URL %q: must be written in canonical form, without characters that need escaping", raw)
 	}
 	return u, nil
+}
+
+func isLoopback(host string) bool {
+	ip := net.ParseIP(host)
+	return host == "localhost" || ip != nil && ip.IsLoopback()
 }
 
 // URL returns the issuer URL.

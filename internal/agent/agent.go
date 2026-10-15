@@ -483,6 +483,9 @@ func (a *Agent) ValidateJWTSVID(_ context.Context, req *workload.ValidateJWTSVID
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	if iss, _ := svid.Claims["iss"].(string); iss != a.issuer.URL() {
+		return nil, status.Errorf(codes.InvalidArgument, "issued by %q, not %q", truncate(iss, 128), a.issuer.URL())
+	}
 	claims, err := structpb.NewStruct(normalizeClaims(svid.Claims))
 	if err != nil {
 		return nil, status.Error(codes.Internal, fmt.Sprintf("encoding claims: %v", err))
