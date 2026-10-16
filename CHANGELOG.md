@@ -7,6 +7,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-16
+
+The first stable release: everything in 0.1.0-rc.1 below, and:
+
 ### Changed
 
 - The Helm chart spreads the issuer's replicas across nodes and, where nodes carry a zone label,
@@ -72,5 +76,6 @@ The first version: an issuer, an agent and the `spiffex` command, following vers
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
 
-[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.1.0-rc.1...HEAD
+[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.0
 [0.1.0-rc.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.0-rc.1

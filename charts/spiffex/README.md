@@ -44,7 +44,7 @@ state:
           namespaces: [shop]
 EOF
 
-helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.1.0-rc.1 \
+helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.1.0 \
   --namespace spiffex -f values.yaml
 ```
 
