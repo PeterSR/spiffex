@@ -156,7 +156,8 @@ Flux's helm-controller runs real installs and upgrades, where the lookup works a
 | `securityContext` | no privilege escalation, read-only root, all capabilities dropped | |
 | `resources` | requests `50m`/`32Mi`, limit `128Mi` | |
 | `readinessProbe`, `livenessProbe` | periods and thresholds | Merged into `httpGet /healthz` probes. |
-| `nodeSelector`, `tolerations`, `affinity`, `topologySpreadConstraints`, `priorityClassName` | empty | |
+| `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | empty | |
+| `topologySpreadConstraints` | `[]` | Empty spreads the replicas across nodes (`kubernetes.io/hostname`) and zones (`topology.kubernetes.io/zone`), `maxSkew: 1`, `whenUnsatisfiable: ScheduleAnyway`, so a single-node cluster still schedules them. A list given replaces this default. |
 | `extraVolumes`, `extraVolumeMounts`, `extraEnv` | `[]` | |
 
 `values.schema.json` refuses unknown values. The settings these values become are described in

@@ -250,6 +250,64 @@ func TestChartRendering(t *testing.T) {
 	}
 }
 
+// The replicas spread across nodes and zones by default, as a preference
+// only, and a list given replaces that default.
+func TestChartTopologySpread(t *testing.T) {
+	helm := helmPath(t)
+	base := []string{"template", "spiffex-issuer", chartDir, "--namespace", "spiffex",
+		"--set", "trustDomain=example.org", "--set", "signingKeys.existingSecret=keys", "--set", "tls.existingSecret=tls"}
+	spread := func(args ...string) []map[string]any {
+		t.Helper()
+		out, err := exec.Command(helm, append(slices.Clone(base), args...)...).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec := yaml.NewDecoder(bytes.NewReader(out))
+		for {
+			var o struct {
+				Kind string `yaml:"kind"`
+				Spec struct {
+					Template struct {
+						Spec struct {
+							TopologySpreadConstraints []map[string]any `yaml:"topologySpreadConstraints"`
+						} `yaml:"spec"`
+					} `yaml:"template"`
+				} `yaml:"spec"`
+			}
+			if err := dec.Decode(&o); err != nil {
+				t.Fatal("no Deployment rendered: ", err)
+			}
+			if o.Kind == "Deployment" {
+				return o.Spec.Template.Spec.TopologySpreadConstraints
+			}
+		}
+	}
+
+	got := spread()
+	var keys []string
+	for _, c := range got {
+		keys = append(keys, fmt.Sprint(c["topologyKey"]))
+		if c["maxSkew"] != 1 || c["whenUnsatisfiable"] != "ScheduleAnyway" {
+			t.Errorf("%v: want maxSkew 1 and whenUnsatisfiable ScheduleAnyway", c)
+		}
+		want := map[string]any{"matchLabels": map[string]any{
+			"app.kubernetes.io/name": "spiffex", "app.kubernetes.io/instance": "spiffex-issuer",
+		}}
+		if fmt.Sprint(c["labelSelector"]) != fmt.Sprint(want) {
+			t.Errorf("%v: the label selector is not the chart's selector labels", c)
+		}
+	}
+	if !slices.Equal(keys, []string{"kubernetes.io/hostname", "topology.kubernetes.io/zone"}) {
+		t.Errorf("the default spreads over %v", keys)
+	}
+
+	got = spread("--set", "topologySpreadConstraints[0].maxSkew=2", "--set", "topologySpreadConstraints[0].topologyKey=rack",
+		"--set", "topologySpreadConstraints[0].whenUnsatisfiable=DoNotSchedule")
+	if len(got) != 1 || got[0]["topologyKey"] != "rack" {
+		t.Errorf("a list given did not replace the default: %v", got)
+	}
+}
+
 // schemaErrorNames reports whether a Helm error names the value at path.
 // Helm releases word schema errors differently: older ones name the value
 // as image.digest, newer ones as the JSON pointer /image/digest.

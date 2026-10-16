@@ -112,6 +112,20 @@ spec:
         app: spiffex-issuer
     spec:
       serviceAccountName: spiffex-issuer
+      # Preferences only, so that a single-node cluster still schedules both replicas.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: spiffex-issuer
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: spiffex-issuer
       securityContext:
         runAsNonRoot: true
         # The key files below are readable by this group alone (mode 0440),

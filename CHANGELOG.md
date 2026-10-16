@@ -7,6 +7,13 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The Helm chart spreads the issuer's replicas across nodes and, where nodes carry a zone label,
+  across zones by default, as a preference (`whenUnsatisfiable: ScheduleAnyway`) so that single-node
+  clusters still schedule them. `topologySpreadConstraints` replaces the default when set. The plain
+  manifest in `deploy/kubernetes` does the same.
+
 ## [0.1.0-rc.1] - 2026-10-16
 
 The first version: an issuer, an agent and the `spiffex` command, following version 0 of

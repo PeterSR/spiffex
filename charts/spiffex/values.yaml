@@ -146,6 +146,9 @@ livenessProbe:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# Empty spreads the replicas across nodes and, where nodes carry a zone label, across zones, both
+# with whenUnsatisfiable: ScheduleAnyway so that a single-node cluster still schedules them. A list
+# given replaces that default.
 topologySpreadConstraints: []
 priorityClassName: ""
 

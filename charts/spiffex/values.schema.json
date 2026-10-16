@@ -362,9 +362,11 @@
       }
     },
     "affinity": {
+      "description": "The pod's affinity, as Kubernetes takes it",
       "type": "object"
     },
     "topologySpreadConstraints": {
+      "description": "Replaces the default spread across nodes and zones when not empty",
       "type": "array",
       "items": {
         "type": "object"
