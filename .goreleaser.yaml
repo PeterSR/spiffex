@@ -107,8 +107,7 @@ release:
   name_template: "v{{ .Version }}"
 
 # The notes come from CHANGELOG.md (scripts/changelog-section.sh), passed with --release-notes.
-changelog:
-  disable: true
+# changelog.disable must stay unset: it also turns off reading that file.
 
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot.{{ .ShortCommit }}"

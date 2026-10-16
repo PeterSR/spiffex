@@ -210,8 +210,15 @@ jobs:
         env:
           MINOR: ${{ needs.release.outputs.minor }}
           DIGEST: ${{ needs.release.outputs.digest }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Set again here so the published notes never depend on how goreleaser
+      # treated them.
+      - name: release notes from CHANGELOG.md
+        run: scripts/changelog-section.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
       - name: publish the draft release
-        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease="$PRERELEASE" --latest="$LATEST"
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease="$PRERELEASE" --latest="$LATEST" --notes-file "$RUNNER_TEMP/notes.md"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PRERELEASE: ${{ needs.release.outputs.prerelease }}
