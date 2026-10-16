@@ -113,8 +113,8 @@ type RemoteKeys struct {
 	// these paths and no query.
 	BearerPaths []string
 	// RefusePrivateAddresses refuses connections to loopback, link-local,
-	// private and other non-public addresses, except for the hosts in
-	// AllowPrivateHosts.
+	// private and other non-public addresses, except for the host:port
+	// pairs in AllowPrivateHosts.
 	RefusePrivateAddresses bool
 	AllowPrivateHosts      []string
 
@@ -243,7 +243,7 @@ func (r *RemoteKeys) client() (*http.Client, error) {
 	if r.RefusePrivateAddresses {
 		checked := &net.Dialer{Timeout: 10 * time.Second, Control: refusePrivate}
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if host, _, err := net.SplitHostPort(addr); err == nil && hostIn(host, r.AllowPrivateHosts) {
+			if hostPortIn(addr, r.AllowPrivateHosts) {
 				return dialer.DialContext(ctx, network, addr)
 			}
 			return checked.DialContext(ctx, network, addr)
@@ -312,6 +312,22 @@ func (r *RemoteKeys) bearerAllowed(u *url.URL) bool {
 		return false
 	}
 	return len(r.BearerPaths) == 0 || u.RawQuery == "" && slices.Contains(r.BearerPaths, u.Path)
+}
+
+// hostPortIn reports whether addr, the host and port a URL names, is one of
+// hostPorts, comparing host names without regard to case.
+func hostPortIn(addr string, hostPorts []string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	for _, hp := range hostPorts {
+		h, p, err := net.SplitHostPort(hp)
+		if err == nil && p == port && strings.EqualFold(h, host) {
+			return true
+		}
+	}
+	return false
 }
 
 func hostIn(host string, hosts []string) bool {

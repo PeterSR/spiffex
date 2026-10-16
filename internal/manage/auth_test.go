@@ -1,6 +1,7 @@
 package manage
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -113,21 +114,25 @@ func TestReplayedTokenCannotWriteAgain(t *testing.T) {
 	}
 }
 
-// A full record makes room by forgetting the entry that expires first.
-func TestReplayCacheEvictsTheSoonestToExpire(t *testing.T) {
+// A full record refuses new tokens until entries expire, rather than forget
+// one that could then write again.
+func TestReplayCacheRefusesWhenFull(t *testing.T) {
 	c := newReplayCache()
 	now := time.Now()
 	for i := range maxReplayEntries {
-		c.use(fmt.Sprint(i), now.Add(time.Minute+time.Duration(i)*time.Millisecond), now)
+		if err := c.use(fmt.Sprint(i), now.Add(time.Minute+time.Duration(i)*time.Millisecond), now); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if !c.use("new", now.Add(5*time.Minute), now) {
-		t.Fatal("a full record refused a new token")
+	if err := c.use("new", now.Add(5*time.Minute), now); !errors.Is(err, errReplayFull) {
+		t.Errorf("a full record took a new token: %v", err)
 	}
-	if _, kept := c.seen["0"]; kept {
-		t.Error("the entry expiring first was kept")
+	if err := c.use("0", now.Add(time.Minute), now); !errors.Is(err, errReplayed) {
+		t.Errorf("a remembered token was taken again: %v", err)
 	}
-	if c.use(fmt.Sprint(maxReplayEntries-1), now.Add(time.Minute), now) {
-		t.Error("an entry that was not evicted was accepted again")
+	later := now.Add(time.Minute + time.Millisecond)
+	if err := c.use("new", later.Add(5*time.Minute), later); err != nil {
+		t.Errorf("the record stayed full after entries expired: %v", err)
 	}
 }
 

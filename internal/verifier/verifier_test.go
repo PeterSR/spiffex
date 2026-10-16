@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/PeterSR/spiffex/internal/procgroup"
+	"github.com/PeterSR/spiffex/internal/proctest"
 	"github.com/PeterSR/spiffex/internal/state"
 )
 
@@ -73,20 +74,21 @@ func fakeVerifier(mode string, args []string) int {
 		}
 		time.Sleep(time.Minute)
 	case "background":
-		// Leaves a sleeper behind and exits successfully.
+		// Leaves a sleeper behind and exits successfully, once the test
+		// watches the sleeper.
 		child := exec.Command(os.Args[0], "verifier:orphan", args[0])
 		if err := child.Start(); err != nil {
 			return 3
 		}
-		for i := 0; i < 200; i++ {
-			if _, err := os.Stat(args[0]); err == nil {
+		for i := 0; i < 500; i++ {
+			if _, err := os.Stat(args[0] + ".ack"); err == nil {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
 		_, _ = os.Stdout.WriteString(`{"claims":{}}`)
 	case "orphan":
-		_ = os.WriteFile(args[0], []byte(strconv.Itoa(os.Getpid())), 0o600)
+		_ = os.WriteFile(args[0], []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 		time.Sleep(time.Minute)
 	case "big":
 		_, _ = os.Stdout.WriteString(`{"claims":{},"pad":"` + strings.Repeat("x", maxOutput) + `"}`)
@@ -223,24 +225,21 @@ func TestRunKillsProcessGroupAtTimeout(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "orphan.pid")
 	r := newRunner(t)
 	start := time.Now()
-	_, err := r.Run(context.Background(), request(execOrigin(t, 2*time.Second, "verifier:sleep", pidFile), "p"))
+	done := make(chan error, 1)
+	origin := execOrigin(t, 2*time.Second, "verifier:sleep", pidFile)
+	go func() {
+		_, err := r.Run(context.Background(), request(origin, "p"))
+		done <- err
+	}()
+	orphan := proctest.Open(t, proctest.WaitForPID(t, pidFile, 2*time.Second), "verifier:orphan")
+	err := <-done
 	if !errors.Is(err, ErrRejected) || !strings.Contains(err.Error(), "did not finish") {
 		t.Fatalf("err = %v, want a timeout rejection", err)
 	}
 	if elapsed := time.Since(start); elapsed > 6*time.Second {
 		t.Errorf("Run took %s after a 2s timeout", elapsed)
 	}
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("the verifier's child never ran: %v", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	// Signalling 0 or -1 would reach this process's group, or every process
-	// the user owns.
-	if err != nil || pid <= 1 {
-		t.Fatalf("not a child's process ID: %q", data)
-	}
-	wantGone(t, pid)
+	orphan.WaitGone(t, 5*time.Second, "the verifier's child")
 }
 
 // A verifier that succeeds takes what it started with it, and nothing is
@@ -248,36 +247,21 @@ func TestRunKillsProcessGroupAtTimeout(t *testing.T) {
 func TestRunKillsWhatASuccessfulVerifierLeaves(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "sleeper.pid")
 	r := newRunner(t)
-	if _, err := r.Run(context.Background(), request(execOrigin(t, 5*time.Second, "verifier:background", pidFile), "p")); err != nil {
+	done := make(chan error, 1)
+	origin := execOrigin(t, 5*time.Second, "verifier:background", pidFile)
+	go func() {
+		_, err := r.Run(context.Background(), request(origin, "p"))
+		done <- err
+	}()
+	sleeper := proctest.Open(t, proctest.WaitForPID(t, pidFile, 5*time.Second), "verifier:orphan")
+	proctest.Ack(t, pidFile+".ack")
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("the verifier's child never ran: %v", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	// Signalling 0 or -1 would reach this process's group, or every process
-	// the user owns.
-	if err != nil || pid <= 1 {
-		t.Fatalf("not a child's process ID: %q", data)
-	}
 	// Gone at once, not even a zombie: Run has killed and reaped it.
-	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-		syscall.Kill(pid, syscall.SIGKILL)
-		t.Errorf("the verifier's child is still there after Run: %v", err)
-	}
-}
-
-// wantGone waits for a process to be gone entirely: killed and reaped.
-func wantGone(t *testing.T, pid int) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
-		if time.Now().After(deadline) {
-			syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatal("the verifier's child outlived its verifier")
-		}
-		time.Sleep(20 * time.Millisecond)
+	if sleeper.Alive() {
+		sleeper.Kill()
+		t.Error("the verifier's child is still there after Run")
 	}
 }
 
@@ -356,6 +340,26 @@ func TestAddressLimiter(t *testing.T) {
 	}
 }
 
+// Moving between the /64s of one /48 gains a client at most siteFactor
+// times the limit of one address.
+func TestAddressLimiterSiteTier(t *testing.T) {
+	l := newAddressLimiter(1, 2)
+	now := time.Now()
+	allowed := 0
+	for i := range 100 {
+		addr := netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, byte(i), 15: 1})
+		for l.allow(addr, now) {
+			allowed++
+		}
+	}
+	if allowed != 2*siteFactor {
+		t.Errorf("one /48 started %d verifiers at once, want %d", allowed, 2*siteFactor)
+	}
+	if !l.allow(netip.MustParseAddr("2001:db8:2::1"), now) {
+		t.Error("another /48 was limited")
+	}
+}
+
 func TestNewRunnerRefusesZeroLimits(t *testing.T) {
 	if _, err := NewRunner(Limits{PerOrigin: 1, Total: 1, PerAddressPerMinute: 0, PerAddressBurst: 1}); err == nil {
 		t.Error("a zero limit was accepted")
@@ -382,5 +386,78 @@ func TestAddressLimiterEvictsTheOldest(t *testing.T) {
 	}
 	if !l.allow(first, now) {
 		t.Error("the forgotten address was still limited")
+	}
+}
+
+// Close waits for the verifiers running, and no more start after it.
+func TestCloseWaitsForRunningVerifiers(t *testing.T) {
+	r := newRunner(t)
+	origin := execOrigin(t, 5*time.Second, "verifier:slow")
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.Run(context.Background(), request(origin, "p"))
+		done <- err
+	}()
+	waitRunning(t, r, 1)
+	if left := r.Close(10 * time.Second); len(left) != 0 {
+		t.Errorf("Close gave up with %v still running", left)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("the running verifier: %v", err)
+		}
+	default:
+		t.Fatal("Close returned while a verifier was running")
+	}
+	if _, err := r.Run(context.Background(), request(origin, "p")); !errors.Is(err, ErrClosed) {
+		t.Errorf("Run after Close: %v, want ErrClosed", err)
+	}
+}
+
+// A verifier that cannot be killed does not hold Close up past its wait;
+// Close says what still runs.
+func TestCloseGivesUpOnAnUnkillableVerifier(t *testing.T) {
+	r := newRunner(t)
+	release := make(chan struct{})
+	defer close(release)
+	// Stands in for a verifier whose process group ignores the kill: it
+	// returns only when the test ends, whatever its context says.
+	r.exec = func(context.Context, []string, time.Duration, []byte, *User) ([]byte, error) {
+		<-release
+		return nil, errors.New("gone")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	origin := execOrigin(t, 5*time.Second, "verifier:echo")
+	go func() { _, _ = r.Run(ctx, request(origin, "p")) }()
+	waitRunning(t, r, 1)
+	cancel()
+	start := time.Now()
+	left := r.Close(200 * time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Close took %s with a 200ms wait", elapsed)
+	}
+	if left["aws"] != 1 {
+		t.Errorf("Close reported %v still running, want aws: 1", left)
+	}
+}
+
+func waitRunning(t *testing.T, r *Runner, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.mu.Lock()
+		running := 0
+		for _, c := range r.running {
+			running += c
+		}
+		r.mu.Unlock()
+		if running >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the verifier never started")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

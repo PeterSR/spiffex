@@ -17,7 +17,7 @@ func runToken(ctx context.Context, args []string) error {
 		return err
 	}
 	if len(audiences) == 0 {
-		return errors.New("-audience is required")
+		return usageError{errors.New("-audience is required")}
 	}
 	cred, err := creds.credential()
 	if err != nil {

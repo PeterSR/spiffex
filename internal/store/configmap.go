@@ -29,7 +29,8 @@ const requestTimeout = 15 * time.Second
 // ConfigMap keeps the state in a Kubernetes ConfigMap, under the key
 // state.yaml. It talks to the API server directly, with the bearer token and
 // CA certificates of a service account, so it needs permission to get and
-// update the ConfigMap, and to create it when it does not exist yet.
+// update the ConfigMap. It never creates it: the ConfigMap must exist, even
+// with no state.yaml, before anything is written.
 type ConfigMap struct {
 	Namespace string
 	Name      string
@@ -100,9 +101,13 @@ func (c *ConfigMap) Load(ctx context.Context) (*Snapshot, error) {
 	return parsed(version, []byte(data)), nil
 }
 
+// ErrNoConfigMap means the ConfigMap to write to does not exist. The store
+// does not create it, so the issuer needs no permission to create objects.
+var ErrNoConfigMap = errors.New("the ConfigMap does not exist; create it first, for example with kubectl create configmap NAME -n NAMESPACE --from-literal=state.yaml=")
+
 // Write implements Store. The API server enforces the compare-and-swap: an
-// update carries the resourceVersion it replaces, and a create fails when
-// the ConfigMap exists.
+// update carries the resourceVersion it replaces. Writing with Absent fails,
+// with ErrConflict when the ConfigMap exists and ErrNoConfigMap when not.
 func (c *ConfigMap) Write(ctx context.Context, st *state.State, ifVersion string) (string, error) {
 	st, err := canonical(st)
 	if err != nil {
@@ -112,18 +117,12 @@ func (c *ConfigMap) Write(ctx context.Context, st *state.State, ifVersion string
 	if err != nil {
 		return "", err
 	}
-	if ifVersion == Absent {
-		obj := map[string]any{
-			"apiVersion": "v1",
-			"kind":       "ConfigMap",
-			"metadata":   map[string]any{"name": c.Name, "namespace": c.Namespace},
-			"data":       map[string]string{ConfigMapKey: string(data)},
-		}
-		return c.send(ctx, http.MethodPost, c.collectionURL(), obj)
-	}
 	current, raw, err := c.get(ctx)
 	if err != nil {
 		return "", err
+	}
+	if current == nil && ifVersion == Absent {
+		return "", fmt.Errorf("%s: %w", c, ErrNoConfigMap)
 	}
 	if current == nil || current.Metadata.ResourceVersion != ifVersion {
 		return "", ErrConflict
@@ -170,7 +169,7 @@ func (c *ConfigMap) get(ctx context.Context) (*configMap, map[string]any, error)
 	return &obj, raw, nil
 }
 
-// send creates or updates the ConfigMap and returns its new version.
+// send updates the ConfigMap and returns its new version.
 func (c *ConfigMap) send(ctx context.Context, method, target string, obj any) (string, error) {
 	payload, err := json.Marshal(obj)
 	if err != nil {

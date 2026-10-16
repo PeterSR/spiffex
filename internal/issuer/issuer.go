@@ -297,6 +297,9 @@ func (iss *Issuer) Bundle() ([]byte, error) {
 
 // Mint signs a JWT-SVID for id with the given audiences. A token for the
 // management endpoint lives at most five minutes.
+// errNoSigningKey means every signing key is exposed, so none may sign.
+var errNoSigningKey = errors.New("no signing key may sign")
+
 func (iss *Issuer) Mint(id spiffeid.ID, audiences []string) (token string, expires time.Time, err error) {
 	if !id.MemberOf(iss.cfg.TrustDomain) {
 		return "", time.Time{}, fmt.Errorf("%s is not in trust domain %s", id, iss.cfg.TrustDomain)
@@ -311,7 +314,11 @@ func (iss *Issuer) Mint(id spiffeid.ID, audiences []string) (token string, expir
 	}
 	now := iss.cfg.Now().Truncate(time.Second)
 	set, _, _ := iss.cfg.Keys.Current()
-	key := set.Active(now, iss.cfg.ActivationDelay)
+	key, ok := set.Active(now, iss.cfg.ActivationDelay)
+	if !ok {
+		iss.cfg.Logger.Error("no signing key may sign: every key is exposed; add a new key that only the issuer can read")
+		return "", time.Time{}, errNoSigningKey
+	}
 
 	signer, err := jose.NewSigner(
 		jose.SigningKey{

@@ -77,6 +77,14 @@ type Runner struct {
 	perOrigin map[string]chan struct{}
 	addresses *addressLimiter
 	now       func() time.Time
+
+	// running counts, by origin, the verifiers started and not yet
+	// finished, and wg them all. Once closed, no more start.
+	running map[string]int
+	wg      sync.WaitGroup
+	closed  bool
+	// exec runs one verifier; tests replace it.
+	exec func(ctx context.Context, argv []string, timeout time.Duration, stdin []byte, user *User) ([]byte, error)
 }
 
 // NewRunner returns a Runner with the given limits.
@@ -85,13 +93,71 @@ func NewRunner(limits Limits) (*Runner, error) {
 		return nil, errors.New("every verifier limit must be at least 1")
 	}
 	closeInheritedOnExec()
-	return &Runner{
+	r := &Runner{
 		limits:    limits,
 		total:     make(chan struct{}, limits.Total),
 		perOrigin: map[string]chan struct{}{},
 		addresses: newAddressLimiter(float64(limits.PerAddressPerMinute)/60, float64(limits.PerAddressBurst)),
 		now:       time.Now,
-	}, nil
+		running:   map[string]int{},
+		exec:      run,
+	}
+	return r, nil
+}
+
+// ErrClosed means the Runner was closed, as the issuer shuts down.
+var ErrClosed = errors.New("the issuer is shutting down")
+
+// Close stops the Runner from starting verifiers and waits, at most for
+// wait, for those running to finish. Cancelling their requests' contexts
+// first makes that quick: each is then killed with its process group. It
+// returns, by origin, how many still run when it gives up: a verifier the
+// issuer cannot kill must not keep it from exiting.
+func (r *Runner) Close(wait time.Duration) map[string]int {
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	left := map[string]int{}
+	for origin, n := range r.running {
+		if n > 0 {
+			left[origin] = n
+		}
+	}
+	return left
+}
+
+// begin counts a verifier as running, unless the Runner is closed. The
+// count goes up under mu, so it never rises once Close has begun to wait.
+func (r *Runner) begin(origin string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return false
+	}
+	r.running[origin]++
+	r.wg.Add(1)
+	return true
+}
+
+func (r *Runner) end(origin string) {
+	r.mu.Lock()
+	r.running[origin]--
+	r.mu.Unlock()
+	r.wg.Done()
 }
 
 // Request is one proof to verify.
@@ -135,6 +201,10 @@ func (r *Runner) Run(ctx context.Context, req Request) (map[string]any, error) {
 	if !r.addresses.allow(req.Client, r.now()) {
 		return nil, fmt.Errorf("%w: client %s", ErrBusy, req.Client)
 	}
+	if !r.begin(req.Origin.Name) {
+		return nil, ErrClosed
+	}
+	defer r.end(req.Origin.Name)
 	release, ok := r.acquire(req.Origin.Name)
 	if !ok {
 		return nil, fmt.Errorf("%w: origin %s", ErrBusy, req.Origin.Name)
@@ -156,7 +226,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := run(ctx, ex.Command, ex.Timeout, stdin, r.limits.User)
+	out, err := r.exec(ctx, ex.Command, ex.Timeout, stdin, r.limits.User)
 	if err != nil {
 		return nil, err
 	}

@@ -457,7 +457,8 @@ may include a local file's content.
   lacks, at most every 30 seconds. When the upstream cannot be reached, cached keys stay usable for
   at most 24 hours.
 - Which addresses the issuer may fetch from is deployment policy. An implementation SHOULD offer a
-  setting that refuses loopback, link-local and private addresses for fetches made for origins.
+  setting that refuses loopback, link-local and private addresses for fetches made for origins, on
+by default, with a list of hosts and ports exempt from it.
 
 ### 5.3 Shared upstreams
 
@@ -628,7 +629,7 @@ MUST NOT hold more than 256 grants, or a grant more than 16 scopes, which keeps 
 section 8.2 cheap.
 
 Whoever can write the stored state directly controls every identity. That access is the way in for
-the first grant (section 8.4), and the way back when every granted identity is lost.
+the first grant (section 8.5), and the way back when every granted identity is lost.
 
 ### 6.2 Validation
 
@@ -644,7 +645,16 @@ origin is expanded with its provider and parameters, the following hold:
 - `jwt` proofs satisfy sections 5.2 and 5.3;
 - `exec` proofs satisfy section 5.4, and their `shared` and `owner_claims` section 5.3;
 - a `keys` origin has no `require`, `match` or `deny`, and only a `keys` origin has `members`;
-- grants satisfy section 8.2, including its closure rule.
+- grants satisfy section 8.2, including its closure rule;
+- no `jwt` upstream issuer equals the issuer URL, ignoring a trailing `/`, and no `jwt` audience is
+  the issuer URL or under it, other than the origin's own origin audience, so no origin can claim
+  the issuer's endpoints or another origin's audience;
+- a `jwt` proof with `jwks` or `jwks_file` has no `ca_file` or `bearer_token_file`, which only
+  apply to fetched keys;
+- no pattern in `match`, `deny` or `audiences` is empty;
+- a member key given as a JWK has `use` absent or `sig`, and an `alg`, if present, that fits the
+  key;
+- an `exec` command's path is absolute and clean (no `.` or `..` segments, no repeated `/`).
 
 An issuer MUST refuse an invalid state as a whole: at startup it does not start, and while running
 it keeps serving the last valid state and reports the error. The management API MUST refuse a
@@ -813,6 +823,10 @@ implementation documents.
 | Write to a name, prefix, or upstream issuer and audience taken by an object the caller may not read | 409 |
 | `If-Match` does not match | 412 |
 | The change would make the state invalid | 422, with the reasons |
+| A body that is not one JSON value of the expected shape, or has unknown fields | 400 |
+| A body larger than 1 MiB | 413 |
+| The caller is over its rate limit | 429, with `Retry-After` |
+| The stored state cannot be read or is invalid, or a write kept losing to others | 503 |
 
 The `422` reasons, and every other response, MUST NOT include any part of an object the caller may
 not read, beyond the non-secret fields of section 4.
@@ -820,7 +834,29 @@ not read, beyond the non-secret fields of section 4.
 Every successful write MUST be logged with the caller's SPIFFE ID, the object changed and the new
 version.
 
-### 8.4 Bootstrap
+### 8.4 Wire format
+
+Request and response bodies are JSON, `Content-Type: application/json`, in the shapes of section
+6.1: an origin, a provider or a grant as it appears in the state document, a member as
+`{"keys": [...]}`, and the state as the whole document.
+
+- **Success.** A read answers `200` with the object. A `PUT` answers `201` when it created the
+  object and `200` when it replaced it, with the object as stored. A `DELETE` answers `204`.
+- **Versions.** The `ETag` is the state version as a quoted string. `If-Match` takes one or more
+  such strings, or `*`, which matches any existing state.
+- **Errors.** Every answer other than a success has the body
+  `{"error": "<message>", "problems": [{"path": "<path>", "message": "<message>"}]}`, where
+  `problems` is present only for `422` and `path` names a place in the state document, such as
+  `origins.web.prefix`, or is absent for the document as a whole.
+- **Check.** `POST /manage/check` answers `200` with
+  `{"valid": <bool>, "problems": [...], "overrides": ["<provider>", ...]}`, without an `ETag`.
+- **Providers.** `GET /manage/providers/{name}` serves shipped providers as well as those in the
+  state, and says which with the header `Spiffex-Provider-Source: state` or `shipped`. Responses to
+  `GET /manage/state` and `GET /manage/providers/{name}` carry `Spiffex-Overrides`, the names of
+  the state's providers that take the place of shipped ones, separated by commas, when there are
+  any.
+
+### 8.5 Bootstrap
 
 An issuer starts with empty state and no grants, so nobody can use the management API. The first
 origin and the first grant are written to the stored state directly, by whoever has that access
@@ -853,7 +889,7 @@ The agent's gRPC status codes:
 | `ValidateJWTSVID` given a token that does not validate | `InvalidArgument` |
 | The issuer refused the request (`invalid_client`, `invalid_request`, `invalid_target`, `unsupported_grant_type`) | `PermissionDenied` |
 | The issuer is unreachable or failed, or no bundle has been fetched yet | `Unavailable` |
-| The agent cannot produce its own proof of identity (an unreadable key or subject token file) | `FailedPrecondition` |
+| The agent cannot produce its own proof of identity (an unreadable subject token file, or a subject token command that fails) | `FailedPrecondition` |
 
 An agent supports both grants of section 3 and is configured to use one. For token exchange it
 obtains the subject token for each request either by reading a file, which platforms such as

@@ -141,7 +141,7 @@ func TestActive(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := set.Active(c.now, delay); got.ID != c.want.ID {
+			if got := set.activeKey(c.now, delay); got.ID != c.want.ID {
 				t.Errorf("Active = %s, want %s", got.Created, c.want.Created)
 			}
 		})
@@ -305,7 +305,7 @@ func TestLoadDirCountsActivationFromArrival(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := set.Active(arrived.Add(30*time.Minute), time.Hour); got.ID != current.ID {
+	if got := set.activeKey(arrived.Add(30*time.Minute), time.Hour); got.ID != current.ID {
 		t.Error("a backdated key signs before its activation delay has passed since it arrived")
 	}
 }
@@ -360,7 +360,7 @@ func TestOrderFollowsCreationNotModificationTime(t *testing.T) {
 	}
 	delay := time.Hour
 	for _, now := range []time.Time{rewrite, rewrite.Add(2 * delay)} {
-		if got := set.Active(now, delay); got.ID != newer.ID {
+		if got := set.activeKey(now, delay); got.ID != newer.ID {
 			t.Errorf("at %s: signing with %s, want the newer key", now, got.File)
 		}
 		for _, k := range set.Retired(now, delay, 10*time.Minute) {
@@ -369,4 +369,10 @@ func TestOrderFollowsCreationNotModificationTime(t *testing.T) {
 			}
 		}
 	}
+}
+
+// activeKey is Active for sets that always have a key that may sign.
+func (s *Set) activeKey(now time.Time, activationDelay time.Duration) Key {
+	k, _ := s.Active(now, activationDelay)
+	return k
 }

@@ -4,8 +4,10 @@
 #   Secret spiffex-signing-keys   key files made with: spiffex key add -dir <dir>
 #   Secret spiffex-issuer-tls     tls.crt and tls.key for spiffex-issuer.spiffex.svc
 #
-# Adjust trust_domain, and the cluster origin's issuer if your cluster's
-# service account issuer differs (kubectl get --raw /.well-known/openid-configuration).
+# Adjust trust_domain, the cluster origin's namespaces, and its issuer if your
+# cluster's service account issuer differs
+# (kubectl get --raw /.well-known/openid-configuration). Pin the image to a
+# digest once releases publish one.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -33,11 +35,9 @@ data:
     # Serve the management API at https://spiffex-issuer.spiffex.svc/manage.
     # Nobody can use it until spiffex bootstrap has written a first grant.
     management: true
-    # Keys are fetched only from public addresses, but for the cluster's own
-    # API server, which the kubernetes provider reads them from.
-    fetch:
-      refuse_private_addresses: true
-      allow_private_hosts: [kubernetes.default.svc.cluster.local]
+    # Left out, fetch keeps its defaults: keys are fetched only from public
+    # addresses, but for the cluster's own API server on port 443, which the
+    # kubernetes provider reads them from.
 ---
 # The issuer's state: who gets which identity. The issuer reads it through
 # the Kubernetes API and takes up changes while it runs. Apply it once; after
@@ -52,12 +52,13 @@ metadata:
 data:
   state.yaml: |
     origins:
-      # Every service account in the cluster but those of kube-system, with a
-      # token bound to a running pod and projected for the audience
+      # The service accounts of the namespaces listed, with a token bound to a
+      # running pod and projected for the audience
       # https://spiffex-issuer.spiffex.svc/origins/cluster. A pod of service
       # account billing in namespace shop is
-      # spiffe://example.org/cluster/ns/shop/sa/billing. Narrow it with
-      # namespaces: [shop, ...] under with.
+      # spiffe://example.org/cluster/ns/shop/sa/billing. List only namespaces
+      # whose names nobody else can take: whoever creates a namespace of a
+      # listed name holds its identities.
       cluster:
         provider: kubernetes
         with:
@@ -65,6 +66,7 @@ data:
           # token, which the default system:service-account-issuer-discovery
           # binding allows, if the distribution keeps it.
           issuer: https://kubernetes.default.svc.cluster.local
+          namespaces: [shop]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -112,6 +114,9 @@ spec:
       serviceAccountName: spiffex-issuer
       securityContext:
         runAsNonRoot: true
+        # The key files below are readable by this group alone (mode 0440),
+        # which the issuer's user is in and a verifier_user would not be.
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -159,9 +164,11 @@ spec:
         - name: keys
           secret:
             secretName: spiffex-signing-keys
+            defaultMode: 0440
         - name: tls
           secret:
             secretName: spiffex-issuer-tls
+            defaultMode: 0440
 ---
 apiVersion: v1
 kind: Service

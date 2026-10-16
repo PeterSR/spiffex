@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -333,9 +334,17 @@ func TestRemoteKeysLimits(t *testing.T) {
 	if _, err := remote.Keys(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "refusing to connect") {
 		t.Errorf("fetched from a loopback address while refusing private ones: %v", err)
 	}
-	remote = &RemoteKeys{URL: ks.URL + "/keys", CAFile: ks.caFile, RefusePrivateAddresses: true, AllowPrivateHosts: []string{"127.0.0.1"}}
+	u, err := url.Parse(ks.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote = &RemoteKeys{URL: ks.URL + "/keys", CAFile: ks.caFile, RefusePrivateAddresses: true, AllowPrivateHosts: []string{"127.0.0.1:1"}}
+	if _, err := remote.Keys(context.Background(), ""); err == nil {
+		t.Error("an exempt host was let through on a port not exempt")
+	}
+	remote = &RemoteKeys{URL: ks.URL + "/keys", CAFile: ks.caFile, RefusePrivateAddresses: true, AllowPrivateHosts: []string{u.Host}}
 	if _, err := remote.Keys(context.Background(), ""); err != nil {
-		t.Errorf("an exempt host was refused: %v", err)
+		t.Errorf("an exempt host and port was refused: %v", err)
 	}
 }
 

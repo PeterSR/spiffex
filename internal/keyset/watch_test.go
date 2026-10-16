@@ -2,10 +2,12 @@ package keyset
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -93,10 +95,10 @@ func TestWatcherDelaysBackdatedKeys(t *testing.T) {
 
 	delay := time.Hour
 	set, _, _ := w.Current()
-	if got := set.Active(c.t, delay); got.ID != current.ID {
+	if got := set.activeKey(c.t, delay); got.ID != current.ID {
 		t.Fatalf("a backdated key signs as soon as it appears")
 	}
-	if got := set.Active(c.t.Add(delay), delay); got.ID != backdated.ID {
+	if got := set.activeKey(c.t.Add(delay), delay); got.ID != backdated.ID {
 		t.Errorf("backdated key not active after the activation delay")
 	}
 }
@@ -200,7 +202,7 @@ func TestSecretRewriteKeepsTheSigningKey(t *testing.T) {
 	w.Reload()
 
 	set, _, _ := w.Current()
-	if got := set.Active(c.t, delay); got.ID != signing.ID {
+	if got := set.activeKey(c.t, delay); got.ID != signing.ID {
 		t.Errorf("running watcher: signs with %s after the rewrite, want the previous signing key", got.File)
 	}
 	// A process started right after the rewrite sees only fresh mtimes.
@@ -208,11 +210,116 @@ func TestSecretRewriteKeepsTheSigningKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := restarted.Active(c.t, delay); got.ID != signing.ID {
+	if got := restarted.activeKey(c.t, delay); got.ID != signing.ID {
 		t.Errorf("restarted process: signs with %s after the rewrite, want the previous signing key", got.File)
 	}
 	c.t = c.t.Add(delay)
-	if got := set.Active(c.t, delay); got.ID != added.ID {
+	if got := set.activeKey(c.t, delay); got.ID != added.ID {
 		t.Errorf("after the activation delay: signs with %s, want the added key", got.File)
+	}
+}
+
+// A new key that fails the check is left out, and logged; a key already in
+// service that starts failing is logged but kept, as dropping it would break
+// the tokens it signed.
+func TestWatcherChecksNewKeys(t *testing.T) {
+	dir := t.TempDir()
+	first, err := Add(dir, ES256, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	w, err := newWatcher(dir, slog.New(slog.NewTextHandler(&logs, nil)), func() time.Time { return t0.Add(time.Hour) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := map[string]bool{}
+	w.CheckNewKeys(func(path string) error {
+		if bad[filepath.Base(path)] {
+			return errors.New("readable by the verifier user")
+		}
+		return nil
+	})
+	second, err := Add(dir, ES256, t0.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad[second.File] = true
+	if w.Reload() {
+		t.Error("a key failing its check changed the published keys")
+	}
+	if set, _, _ := w.Current(); len(set.Keys()) != 1 || set.Keys()[0].ID != first.ID {
+		t.Errorf("keys in service: %v, want only the first", set.IDs())
+	}
+	if !strings.Contains(logs.String(), "not using a new signing key") {
+		t.Errorf("the refused key was not logged:\n%s", logs.String())
+	}
+
+	bad[second.File] = false
+	if !w.Reload() {
+		t.Error("the key, once it passes, was not taken up")
+	}
+	bad[first.File] = true
+	logs.Reset()
+	w.Reload()
+	if set, _, _ := w.Current(); len(set.Keys()) != 2 {
+		t.Errorf("a key in service was dropped: %v", set.IDs())
+	}
+	if !strings.Contains(logs.String(), "a signing key in service fails its check") {
+		t.Errorf("the key in service failing was not logged:\n%s", logs.String())
+	}
+	set, _, _ := w.Current()
+	for _, k := range set.Keys() {
+		if k.Exposed != (k.ID == first.ID) {
+			t.Errorf("key %s: exposed %v", k.File, k.Exposed)
+		}
+	}
+	if k, ok := set.Active(t0.Add(time.Hour), 0); !ok || k.ID != second.ID {
+		t.Errorf("Active chose %s, %v; want the key that is not exposed", k.File, ok)
+	}
+	// Exposure sticks while the key stays, whatever later checks say.
+	bad[first.File] = false
+	w.Reload()
+	if set, _, _ := w.Current(); !set.Keys()[0].Exposed {
+		t.Error("an exposed key was trusted again after a passing check")
+	}
+
+	// With every key exposed, nothing may sign.
+	bad[second.File] = true
+	w.Reload()
+	if set, _, _ := w.Current(); len(set.Keys()) != 2 {
+		t.Errorf("exposed keys were unpublished: %v", set.IDs())
+	} else if _, ok := set.Active(t0.Add(time.Hour), 0); ok {
+		t.Error("Active chose a key with every key exposed")
+	}
+
+	// A key removed and added back is checked like a new one.
+	path := filepath.Join(dir, first.File)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	w.Reload()
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bad[first.File] = true
+	w.Reload()
+	if set, _, _ := w.Current(); slices.Contains(set.IDs(), first.ID) {
+		t.Error("a key added back that fails its check was taken up")
+	}
+	bad[first.File] = false
+	w.Reload()
+	set, _, _ = w.Current()
+	for _, k := range set.Keys() {
+		if k.ID == first.ID && k.Exposed {
+			t.Error("a key added back and passing its check is still marked exposed")
+		}
+	}
+	if !slices.Contains(set.IDs(), first.ID) {
+		t.Error("a key added back that passes its check was not taken up")
 	}
 }

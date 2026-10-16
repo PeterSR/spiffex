@@ -75,6 +75,14 @@ workload intruder "$ISSUER/origins/elsewhere"
 for w in billing orders intruder; do kubectl -n shop rollout status deploy/$w --timeout=120s; done
 
 app() { local w=$1; shift; kubectl -n shop exec deploy/"$w" -c app -- "$@"; }
+# The token exchange the README shows, run as it shows it.
+out=$(kubectl -n shop exec deploy/billing -c spiffex-agent -- /spiffex token \
+  -issuer https://spiffex-issuer.spiffex.svc -ca-file /etc/spiffex/ca.crt \
+  -subject-token-file /var/run/secrets/spiffex/token \
+  -audience spiffe://example.org/cluster/ns/shop/sa/orders) || { echo "FAIL: the README's token exchange: $out"; exit 1; }
+sub=$(printf '%s' "$out" | cut -d. -f2 | tr '_-' '/+' | { b=$(cat); while [ $(( ${#b} % 4 )) -ne 0 ]; do b="$b="; done; printf '%s' "$b"; } | base64 -d 2>/dev/null | sed -n 's/.*"sub":"\([^"]*\)".*/\1/p')
+[ "$sub" = "spiffe://$TD/cluster/ns/shop/sa/billing" ] || { echo "FAIL: the README's token exchange gave sub '$sub'"; exit 1; }
+echo "ok: the README's token exchange works"
 check() { # description want got
   if [ "$2" != "$3" ]; then echo "FAIL: $1: got '$3', want '$2'"; exit 1; fi
   echo "ok: $1"

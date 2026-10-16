@@ -4,10 +4,13 @@ In a cluster, workloads need no key of their own: each pod proves who it is with
 service account token, and the issuer has an origin for the cluster, using the shipped
 `kubernetes` provider:
 
+<!-- check: state -->
 ```yaml
 origins:
   cluster:
     provider: kubernetes
+    with:
+      namespaces: [shop]
 ```
 
 A pod of service account `billing` in namespace `shop` then gets
@@ -16,9 +19,16 @@ audience `https://spiffex-issuer.spiffex.svc/origins/cluster`. `spiffex provider
 prints the provider.
 
 Nothing has to be registered per workload, so there is no operator and no custom resource; a new
-service account has an identity the moment it exists. That is every service account in the
-cluster except those of `kube-system`; narrow it with `with: { namespaces: [shop, ...] }`, or deny
-more with `deny_namespaces`.
+service account has an identity the moment it exists. Without `namespaces`, that is every service
+account in the cluster except those of `kube-system` (`deny_namespaces` refuses more). List the
+namespaces instead, as above.
+
+**Identities are names, and names can be taken.** `ns/<namespace>/sa/<account>` belongs to whoever
+can create that namespace and that service account. On a cluster where customers may create
+namespaces, a customer who creates a namespace with a name the origin admits holds every identity in
+it, and every grant given to those identities. Admit only namespaces whose names are reserved for
+their owners, for instance by a policy that controls who may create them, and keep grants away from
+identities in namespaces that come and go.
 
 The provider requires `kubernetes.io/pod/name`, so it accepts only tokens bound to a pod running as
 that service account, which is what the kubelet projects. That stops a plain `kubectl create
@@ -32,9 +42,10 @@ a pod is deleted: a token taken from a pod keeps working until it expires, at mo
 
 ## The issuer
 
-The manifests refer to the image `ghcr.io/petersr/spiffex:latest`. Until releases publish it, build
-the image from a checkout and push it somewhere your cluster pulls from, then change the `image:`
-lines:
+The manifests refer to the image `ghcr.io/petersr/spiffex:latest`. Once releases publish it, pin the
+image by digest (`ghcr.io/petersr/spiffex@sha256:...`) rather than a tag, so that what runs is what
+you checked. Until then, build the image from a checkout and push it somewhere your cluster pulls
+from, then change the `image:` lines:
 
 ```bash
 docker build -t registry.example.org/spiffex:dev .
@@ -54,7 +65,9 @@ kubectl apply -f deploy/kubernetes/issuer.yaml
 
 The settings are in the ConfigMap `spiffex-issuer`, mounted as a file. The state is in the ConfigMap
 `spiffex-state`, under the key `state.yaml`, which the issuer reads through the Kubernetes API with
-its own service account; a Role lets it get and update that one ConfigMap and nothing else. It needs
+its own service account; a Role lets it get and update that one ConfigMap and nothing else. The
+issuer never creates the ConfigMap, so it must exist before anything writes to it; the manifests
+create it. It needs
 `update` only for the management API, which the example settings turn on; with `management: false`,
 drop the verb. Change the state through the management API, or in place with
 `kubectl -n spiffex edit configmap spiffex-state`: both replicas take up a valid change within the
@@ -88,8 +101,14 @@ some distributions remove that binding, and then the issuer needs one of its own
 `issuer` against your cluster's (`kubectl get --raw /.well-known/openid-configuration`); managed
 clusters often use a public URL there.
 
-The settings refuse key fetches to private addresses, except to `kubernetes.default.svc.cluster.local`,
-so an origin cannot make the issuer reach other services inside the cluster.
+Key fetches to private addresses are refused by default, except to
+`kubernetes.default.svc.cluster.local:443`, so an origin cannot make the issuer reach other services
+inside the cluster.
+
+The signing keys and the TLS key are mounted with mode `0440` and the pod's `fsGroup`, so that only
+the issuer's group can read them. That matters once verifiers are installed: run them as a
+`verifier_user` outside that group, and the issuer refuses to start if that user could read the
+keys ([providers.md](providers.md#the-exec-proof)).
 
 Both replicas sign with the keys in the Secret. Each keeps its own record of used client assertions,
 so with N replicas an intercepted assertion could be replayed up to N times within its lifetime of

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -26,10 +27,15 @@ type Watcher struct {
 	now    func() time.Time
 
 	mu        sync.RWMutex
+	check     func(path string) error
 	set       *Set
 	sequence  uint64
 	changed   chan struct{}
 	firstSeen map[string]time.Time
+	// exposed holds the keys in service that once failed the check. They
+	// stay exposed while they stay in the directory, whatever later checks
+	// say: someone may have read them meanwhile.
+	exposed map[string]bool
 }
 
 // NewWatcher loads dir once and fails if that fails: an issuer must not start
@@ -62,6 +68,7 @@ func newWatcher(dir string, logger *slog.Logger, now func() time.Time) (*Watcher
 		sequence:  uint64(max(newest.Unix(), 1)),
 		changed:   make(chan struct{}),
 		firstSeen: firstSeen,
+		exposed:   map[string]bool{},
 	}, nil
 }
 
@@ -76,6 +83,19 @@ func (w *Watcher) Current() (*Set, uint64, <-chan struct{}) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.set, w.sequence, w.changed
+}
+
+// CheckNewKeys makes every reload check each key file with check. A new key
+// that fails is left out, with an error logged: it is neither published nor
+// signed with. A key already in service that fails is marked exposed: it
+// stays published, since dropping it would break the tokens it signed, but
+// never signs again while it stays in the directory. A key removed and added
+// back counts as new. The issuer uses it to refuse keys an exec verifier
+// could read.
+func (w *Watcher) CheckNewKeys(check func(path string) error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.check = check
 }
 
 // Run polls the directory until ctx is done. A directory that fails to load
@@ -110,7 +130,24 @@ func (w *Watcher) Reload() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	keys := loaded.Keys()
+	var keys []Key
+	for _, k := range loaded.Keys() {
+		_, known := w.firstSeen[k.ID]
+		if w.check != nil {
+			if err := w.check(filepath.Join(w.dir, k.File)); err != nil {
+				if !known {
+					w.logger.Error("not using a new signing key", "file", k.File, "error", err)
+					continue
+				}
+				if !w.exposed[k.ID] {
+					w.logger.Error("a signing key in service fails its check: it no longer signs, and should be replaced", "file", k.File, "error", err)
+				}
+				w.exposed[k.ID] = true
+			}
+		}
+		k.Exposed = w.exposed[k.ID]
+		keys = append(keys, k)
+	}
 	present := make(map[string]bool, len(keys))
 	for i, k := range keys {
 		present[k.ID] = true
@@ -126,6 +163,7 @@ func (w *Watcher) Reload() bool {
 	for id := range w.firstSeen {
 		if !present[id] {
 			delete(w.firstSeen, id)
+			delete(w.exposed, id)
 		}
 	}
 	set, err := NewSet(keys)

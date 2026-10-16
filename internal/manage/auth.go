@@ -18,8 +18,9 @@ import (
 const maxTokenLifetime = 5 * time.Minute
 
 // maxReplayEntries bounds the token IDs remembered from writes. Only
-// authorized writes are remembered; when the record is full, the entry
-// that would expire first makes room.
+// authorized writes are remembered, so only callers with grants can fill the
+// record; when it is full, writes are refused until entries expire, as
+// forgetting one would let its token write again.
 const maxReplayEntries = 1 << 16
 
 var tokenAlgorithms = []jose.SignatureAlgorithm{jose.ES256, jose.RS256}
@@ -128,28 +129,30 @@ func newReplayCache() *replayCache {
 	return &replayCache{seen: map[string]time.Time{}}
 }
 
-// use records a token ID and reports whether it was not used before.
-func (c *replayCache) use(id string, expires, now time.Time) bool {
+// Why a token cannot write.
+var (
+	errReplayed   = errors.New("the token was used for a write before")
+	errReplayFull = errors.New("too many recent writes are remembered to take another")
+)
+
+// use records a token ID, refusing one used before, and any while the
+// record is full.
+func (c *replayCache) use(id string, expires, now time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if until, ok := c.seen[id]; ok && now.Before(until) {
-		return false
+		return errReplayed
 	}
 	if len(c.seen) >= maxReplayEntries {
-		soonest, soonestAt := "", time.Time{}
 		for jti, until := range c.seen {
 			if !now.Before(until) {
 				delete(c.seen, jti)
-				continue
-			}
-			if soonest == "" || until.Before(soonestAt) {
-				soonest, soonestAt = jti, until
 			}
 		}
 		if len(c.seen) >= maxReplayEntries {
-			delete(c.seen, soonest)
+			return errReplayFull
 		}
 	}
 	c.seen[id] = expires
-	return true
+	return nil
 }

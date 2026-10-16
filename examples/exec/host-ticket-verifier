@@ -1,0 +1,56 @@
+#!/usr/bin/python3
+"""A spiffex exec verifier for host tickets.
+
+A ticket is base64url(payload) "." base64url(HMAC-SHA256 of the first part), where the
+payload is JSON with aud, exp, host and site. The provisioning service makes tickets
+with the key in KEY_FILE, which only it and this verifier can read.
+"""
+import base64
+import hashlib
+import hmac
+import json
+import sys
+import time
+
+KEY_FILE = "/etc/spiffex/host-ticket.key"
+MAX_LIFETIME = 300  # seconds
+
+
+def refuse(reason):
+    print(reason, file=sys.stderr)  # the issuer logs it; the client never sees it
+    sys.exit(1)
+
+
+def unb64(text):
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+request = json.load(sys.stdin)
+if request.get("version") != 1:
+    refuse("unknown request version")
+with open(KEY_FILE, "rb") as f:
+    key = f.read().strip()
+
+try:
+    payload, mac = request["subject_token"].split(".")
+    expected = hmac.new(key, payload.encode(), hashlib.sha256).digest()
+    if not hmac.compare_digest(unb64(mac), expected):
+        refuse("bad signature")
+    ticket = json.loads(unb64(payload))
+except ValueError:
+    refuse("malformed ticket")
+if not isinstance(ticket, dict):
+    refuse("malformed ticket")
+
+# The ticket must name this origin's audience, or a ticket made for another
+# service or origin could be replayed here.
+if ticket.get("aud") != request["audience"]:
+    refuse("ticket made for another audience")
+exp, now = ticket.get("exp"), time.time()
+if not isinstance(exp, int) or not now < exp <= now + MAX_LIFETIME:
+    refuse("ticket expired, or meant to live too long")
+host, site = ticket.get("host"), ticket.get("site")
+if not isinstance(host, str) or not isinstance(site, str):
+    refuse("ticket without host or site")
+
+json.dump({"claims": {"host": host, "site": site}}, sys.stdout)

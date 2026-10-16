@@ -149,3 +149,18 @@ origins:
 		t.Errorf("check: %v\n%s", err, out)
 	}
 }
+
+// check refuses a settings file the issuer would refuse, even in fields
+// validation does not use.
+func TestCheckWholeSettings(t *testing.T) {
+	dir := t.TempDir()
+	settings := writeFile(t, dir, "settings.yaml", `
+issuer: https://issuer.example.org
+trust_domain: example.org
+fetch: { allow_private_hosts: ["idp.internal:http"] }
+`)
+	st := writeFile(t, dir, "state.yaml", "origins:\n  kube: { provider: kubernetes }\n")
+	if err := runCheck(t.Context(), []string{"-settings", settings, st}); err == nil || !strings.Contains(err.Error(), "allow_private_hosts") {
+		t.Errorf("check accepted a bad allow_private_hosts: %v", err)
+	}
+}

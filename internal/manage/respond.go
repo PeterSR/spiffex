@@ -90,13 +90,14 @@ const noVersion = "\x00"
 
 func etag(version string) string { return `"` + version + `"` }
 
-// ifMatch reports whether version satisfies the request's If-Match header.
-// Only strong entity tags can match.
+// ifMatch reports whether version satisfies the request's If-Match header:
+// one of its strong entity tags names it, or it is *, which matches any
+// state that exists. A state not stored yet has the empty version.
 func ifMatch(r *http.Request, version string) bool {
 	for _, v := range r.Header.Values("If-Match") {
 		for _, tag := range strings.Split(v, ",") {
 			tag = strings.TrimSpace(tag)
-			if tag == "*" || tag == etag(version) {
+			if tag == "*" && version != "" || tag == etag(version) {
 				return true
 			}
 		}

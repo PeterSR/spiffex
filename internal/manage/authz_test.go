@@ -195,6 +195,9 @@ func TestProviderPermissions(t *testing.T) {
 	if got := h.as("/people/dave", http.MethodGet, "/state", nil).header.Get(OverridesHeader); got != "keys" {
 		t.Errorf("GET /manage/state marks overrides %q, want keys", got)
 	}
+	if a := h.as("/people/dave", http.MethodGet, "/providers/github", nil); a.header.Get(OverridesHeader) != "keys" {
+		t.Errorf("GET of a provider that overrides nothing marks overrides %q, want every override, keys", a.header.Get(OverridesHeader))
+	}
 	wantStatus(t, h.as("/people/alice", http.MethodDelete, "/providers/github", nil), http.StatusNotFound)
 	wantStatus(t, h.as("/people/alice", http.MethodDelete, "/providers/machines", nil), http.StatusNoContent)
 }

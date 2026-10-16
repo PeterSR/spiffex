@@ -114,7 +114,11 @@ func newHarness(t *testing.T, s store.Store, initial stateFunc) *harness {
 		if err := state.Validate(st, settings).Err(); err != nil {
 			t.Fatalf("the initial state is invalid:\n%v", err)
 		}
-		if _, err := s.Write(context.Background(), st, store.Absent); err != nil {
+		empty, err := s.Load(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Write(context.Background(), st, empty.Version); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -291,6 +295,9 @@ func dirStore(t *testing.T) store.Store {
 func configMapStore(t *testing.T) store.Store {
 	t.Helper()
 	api := &fakeAPIServer{objects: map[string]map[string]any{}}
+	// The ConfigMap exists, empty, as the manifests create it: the store
+	// never creates one.
+	api.put("spiffex-state", map[string]any{"metadata": map[string]any{"name": "spiffex-state"}})
 	srv := httptest.NewTLSServer(api)
 	t.Cleanup(srv.Close)
 	dir := t.TempDir()

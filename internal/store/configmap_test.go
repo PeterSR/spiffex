@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"testing"
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
+
+	"github.com/PeterSR/spiffex/internal/state"
 )
 
 var td = spiffeid.RequireTrustDomainFromString("example.org")
@@ -103,13 +106,46 @@ func newConfigMapStore(t *testing.T) (*ConfigMap, *fakeAPIServer) {
 	return &ConfigMap{Namespace: "spiffex", Name: "spiffex-state", APIServer: srv.URL, TokenFile: token, CAFile: ca}, api
 }
 
+// precreated stands in for an operator who creates the ConfigMap before the
+// first write, as the store needs, so the tests every store passes apply.
+type precreated struct {
+	*ConfigMap
+	api *fakeAPIServer
+}
+
+func (p precreated) Write(ctx context.Context, st *state.State, ifVersion string) (string, error) {
+	if ifVersion == Absent {
+		p.api.mu.Lock()
+		_, exists := p.api.objects[p.Name]
+		if !exists {
+			p.api.store(p.Name, map[string]any{"metadata": map[string]any{"name": p.Name}})
+			ifVersion = p.api.objects[p.Name]["metadata"].(map[string]any)["resourceVersion"].(string)
+		}
+		p.api.mu.Unlock()
+	}
+	return p.ConfigMap.Write(ctx, st, ifVersion)
+}
+
 func TestConfigMap(t *testing.T) {
-	c, _ := newConfigMapStore(t)
-	testStoreBasics(t, c)
+	c, api := newConfigMapStore(t)
+	testStoreBasics(t, precreated{c, api})
 	t.Run("concurrent writes", func(t *testing.T) {
-		c, _ := newConfigMapStore(t)
-		testConcurrentWrites(t, c)
+		c, api := newConfigMapStore(t)
+		testConcurrentWrites(t, precreated{c, api})
 	})
+}
+
+// The store never creates the ConfigMap, so the issuer needs no create
+// permission.
+func TestConfigMapIsNotCreated(t *testing.T) {
+	c, api := newConfigMapStore(t)
+	_, err := c.Write(context.Background(), sampleState(t), Absent)
+	if !errors.Is(err, ErrNoConfigMap) {
+		t.Errorf("writing a missing ConfigMap: %v, want ErrNoConfigMap", err)
+	}
+	if len(api.objects) != 0 {
+		t.Error("the ConfigMap was created")
+	}
 }
 
 func TestConfigMapKeepsMetadataAndRefusesOtherKeys(t *testing.T) {

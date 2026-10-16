@@ -4,11 +4,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/PeterSR/spiffex/internal/proctest"
 )
 
 func TestSubjectTokenFromFile(t *testing.T) {
@@ -64,26 +64,17 @@ func TestSubjectTokenCommandLeavesNothing(t *testing.T) {
 		t.Skip("no sh to run commands with")
 	}
 	pidFile := filepath.Join(t.TempDir(), "pid")
-	script := `sleep 60 & echo $! > "$0"; echo token`
-	if _, err := (SubjectToken{Command: []string{sh, "-c", script, pidFile}}).grantParams("", time.Now()); err != nil {
+	// The command waits until the test watches its background process.
+	script := `sleep 60 & echo $! > "$0"; while [ ! -e "$0.ack" ]; do sleep 0.01; done; echo token`
+	done := make(chan error, 1)
+	go func() {
+		_, err := (SubjectToken{Command: []string{sh, "-c", script, pidFile}}).grantParams("", time.Now())
+		done <- err
+	}()
+	sleeper := proctest.Open(t, proctest.WaitForPID(t, pidFile, 5*time.Second), "sleep")
+	proctest.Ack(t, pidFile+".ack")
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	// Signalling 0 or -1 would reach this process's group, or every process
-	// the user owns.
-	if err != nil || pid <= 1 {
-		t.Fatalf("not a child's process ID: %q", data)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
-		if time.Now().After(deadline) {
-			syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatal("the command's background process outlived it")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	sleeper.WaitGone(t, 5*time.Second, "the command's background process")
 }

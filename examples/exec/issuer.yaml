@@ -1,0 +1,19 @@
+# Settings for an issuer with one exec verifier installed: host-ticket-verifier, next to this
+# file, copied to /usr/libexec/spiffex/. A provider in the state can name a verifier only when
+# its command is listed here, with exactly these arguments. See docs/providers.md.
+
+issuer: https://issuer.example.org
+trust_domain: example.org
+keys_dir: keys
+state:
+  file: state.yaml
+
+verifiers:
+  - [/usr/libexec/spiffex/host-ticket-verifier]
+
+# Run verifiers as a user of their own, which alone can read /etc/spiffex/host-ticket.key, and
+# which must not be able to read anything in keys_dir: the issuer checks the files' owners and
+# modes at startup and refuses to start otherwise. This needs the issuer to hold CAP_SETUID,
+# CAP_SETGID and CAP_KILL. Without it, verifiers run as the issuer's own user and can read its
+# signing keys.
+verifier_user: { uid: 65533, gid: 65533 }

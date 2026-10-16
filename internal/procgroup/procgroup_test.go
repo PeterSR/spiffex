@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/PeterSR/spiffex/internal/proctest"
 )
 
 // The test binary doubles as the commands under test, chosen by its first
@@ -37,7 +39,7 @@ func child(mode string, args []string) int {
 		if err := c.Start(); err != nil {
 			return 3
 		}
-		_ = os.WriteFile(args[0], []byte(strconv.Itoa(c.Process.Pid)), 0o600)
+		_ = os.WriteFile(args[0], []byte(strconv.Itoa(c.Process.Pid)+"\n"), 0o600)
 	case "nap":
 		time.Sleep(300 * time.Millisecond)
 	case "fail":
@@ -78,14 +80,13 @@ func TestSweepReapsEscapees(t *testing.T) {
 	if err := Run(command(context.Background(), t, "escape", pidFile)); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid := childPID(t, data)
+	// The escapee is this process's child now, so its ID stays its own
+	// until Sweep reaps it.
+	escapee := proctest.Open(t, proctest.WaitForPID(t, pidFile, time.Second), "nap")
 	deadline := time.Now().Add(5 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
+	for escapee.Alive() {
 		if time.Now().After(deadline) {
+			escapee.Kill()
 			t.Fatal("the escapee was never reaped")
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -133,15 +134,4 @@ func TestKillGroupRefusesBroadcast(t *testing.T) {
 	if !strings.Contains(buf.String(), "cannot kill a process group") {
 		t.Errorf("log: %q", buf.String())
 	}
-}
-
-// childPID parses a process ID a child wrote, refusing anything that kill(2)
-// would read as more than one process.
-func childPID(t *testing.T, data []byte) int {
-	t.Helper()
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 1 {
-		t.Fatalf("not a child's process ID: %q", data)
-	}
-	return pid
 }

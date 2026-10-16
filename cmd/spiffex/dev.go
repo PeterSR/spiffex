@@ -59,7 +59,7 @@ func runDev(_ context.Context, args []string) error {
 		return err
 	}
 	if *dir == "" {
-		return errors.New("-dir is required")
+		return usageError{errors.New("-dir is required")}
 	}
 	td, err := spiffeid.TrustDomainFromString(*trustDomain)
 	if err != nil {

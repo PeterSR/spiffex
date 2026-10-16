@@ -555,3 +555,46 @@ func TestManagementTokensAreNotReused(t *testing.T) {
 		t.Errorf("two tokens for orders made %d requests, want 1", n-2)
 	}
 }
+
+// An agent that cannot make its own proof, here because its subject token
+// file is unreadable, answers FailedPrecondition rather than blaming the
+// issuer.
+func TestUnreadableSubjectToken(t *testing.T) {
+	f := newFixture(t)
+	ctx := f.ctx(t)
+	issuerClient, err := Discover(ctx, f.srv.URL, spiffeid.TrustDomain{}, f.srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	a, err := New(Config{Issuer: issuerClient, Credential: SubjectToken{File: tokenFile}, Logger: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go a.Run(ctx)
+	sock := filepath.Join(t.TempDir(), "agent.sock")
+	l, err := Listen(sock, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServer := a.NewServer()
+	go func() { _ = grpcServer.Serve(l) }()
+	t.Cleanup(grpcServer.Stop)
+
+	client, err := workloadapi.New(ctx, workloadapi.WithAddr("unix://"+sock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := client.FetchJWTSVID(ctx, jwtsvid.Params{Audience: "orders"}); status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("with no subject token file: %v, want FailedPrecondition", err)
+	}
+	if err := os.WriteFile(tokenFile, []byte("x.y.z"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getuid() != 0 {
+		if _, err := client.FetchJWTSVID(ctx, jwtsvid.Params{Audience: "orders"}); status.Code(err) != codes.FailedPrecondition {
+			t.Errorf("with an unreadable subject token file: %v, want FailedPrecondition", err)
+		}
+	}
+}

@@ -294,6 +294,26 @@ origins:
 		{"exec command not a clean path", `
 providers:
   v: { proof: { exec: { command: [/usr/local/../bin/verify], shared: false } } }`, "providers.v.proof.exec.command[0]", "clean absolute path"},
+		{"exec command with a dot segment", `
+providers:
+  v: { proof: { exec: { command: [/usr/local/bin/./verify], shared: false } } }`, "providers.v.proof.exec.command[0]", "clean absolute path"},
+		{"exec command with a repeated slash", `
+providers:
+  v: { proof: { exec: { command: [/usr/local//bin/verify], shared: false } } }`, "providers.v.proof.exec.command[0]", "clean absolute path"},
+		{"exec command with a trailing slash", `
+providers:
+  v: { proof: { exec: { command: [/usr/local/bin/verify/], shared: false } } }`, "providers.v.proof.exec.command[0]", "clean absolute path"},
+
+		// Empty patterns.
+		{"empty deny pattern from a parameter", `
+origins:
+  k: { provider: kubernetes, with: { deny_namespaces: [""] } }`, "origins.k.with.deny_namespaces", "a pattern cannot be empty"},
+		{"empty audience pattern from a parameter", `
+providers:
+  p: { params: { auds: { type: list, required: true } }, proof: { keys: {} }, audiences: $auds, name: "{member}" }
+origins:
+  a: { provider: p, with: { auds: ["https://api.example.org", ""] } }`, "origins.a.with.auds", "a pattern cannot be empty"},
+
 		{"exec timeout over 30s", `
 providers:
   v: { proof: { exec: { command: [/usr/local/bin/verify], shared: false, timeout: 31s } } }`, "providers.v.proof.exec.timeout", "longer than the 30s allowed"},
@@ -423,6 +443,13 @@ func TestMembers(t *testing.T) {
 		}
 		return string(data)
 	}
+	jwkUse := func(key any, use string) string {
+		data, err := json.Marshal(jose.JSONWebKey{Key: key, Use: use})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
 	doc := func(keys ...string) string {
 		return "origins:\n  vms:\n    provider: keys\n    members:\n      m:\n        keys: [" + strings.Join(keys, ", ") + "]\n"
 	}
@@ -441,6 +468,9 @@ func TestMembers(t *testing.T) {
 		{"RSA 1024", quote(pemKey(t, &rsa1024.PublicKey)), "too small"},
 		{"private JWK", jwk(p256, "ES256"), `private member "d"`},
 		{"JWK with a mismatched alg", jwk(&p256.PublicKey, "RS256"), "want ES256"},
+		{"RSA JWK with a mismatched alg", jwk(&rsa2048.PublicKey, "ES256"), "want RS256"},
+		{"JWK for signing", jwkUse(&p256.PublicKey, "sig"), ""},
+		{"JWK for encryption", jwkUse(&p256.PublicKey, "enc"), `use "enc", want sig`},
 		{"not PEM", quote("hello"), "no PEM block"},
 		{"two PEM blocks", quote(pemKey(t, &p256.PublicKey) + pemKey(t, &p256.PublicKey)), "more than one PEM block"},
 		{"symmetric JWK", `{"kty": "oct", "k": "c2VjcmV0"}`, "private key"},

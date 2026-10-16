@@ -1,0 +1,94 @@
+# The state of the example.org trust domain: who gets which identity, and who may change that.
+# The issuer whose settings are in issuer.yaml serves it. Four origins:
+#
+#   prod       pods of the cluster the issuer runs in   spiffe://example.org/prod/ns/<namespace>/sa/<account>
+#   ci         GitHub Actions workflows of one owner   spiffe://example.org/ci/<repository id>
+#   hosts      machines that hold a private key        spiffe://example.org/hosts/<member>
+#   operators  people who manage the state             spiffe://example.org/operators/<member>
+#
+# and three grants. The grant "operators" is what this command writes on a new issuer:
+#
+#   spiffex bootstrap -config issuer.yaml -member alice -key alice.pub
+#
+# Every member key below is a public key; the private halves stay with the machines and people.
+
+origins:
+  # Service accounts of three namespaces. Each pod's token must be projected for the audience
+  # https://spiffex.example.org/origins/prod (docs/kubernetes.md).
+  prod:
+    provider: kubernetes
+    with:
+      namespaces: [shop, payments, platform]
+
+  # Workflows on main and on release tags of two repositories of one GitHub organization. Pin
+  # owner_id and repository ids by number, never by name: names can be renamed and taken. The
+  # workflow asks GitHub for a token with the audience https://spiffex.example.org/origins/ci.
+  ci:
+    provider: github
+    with:
+      owner_id: "1234567"
+      repository_ids: ["600100200", "600100201"]
+      refs: [refs/heads/main, refs/tags/v*]
+    # CI may only ask for tokens to the deploy API and to services in the cluster.
+    audiences: [https://deploy.example.org, spiffe://example.org/prod/*]
+
+  # Machines outside the cluster, each with a key made by: spiffex key generate -out host.key
+  # Client id hosts/<member>.
+  hosts:
+    provider: keys
+    members:
+      build-1:
+        keys:
+          - |
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEeMs6PtCLLbQKPBYlHNZ1qOhtZmqA
+            qMfrEWbOfPLgAAByHe3Rn/PDiv7t8NGs6znhbm6vMUOx7EjavC8uVIHnVA==
+            -----END PUBLIC KEY-----
+      backup-1:
+        keys:
+          - |
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEhaHpGbxL3mjDIkS2guWwHk7TM+5N
+            PzNif1J6xTbwTregP3So9TLfeu7nM0kmqn3Egu8RHR97KzQhdOx9751VTw==
+            -----END PUBLIC KEY-----
+
+  # People, with client ids operators/alice and operators/bob. Identities that hold grants come
+  # from a keys origin that only the operators themselves may write.
+  operators:
+    provider: keys
+    members:
+      alice:
+        keys:
+          - |
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1dNda23Wln/DKeV6nKxZwUmhurfx
+            OsEoJpCU94CRXRzhg9jR3IZCzkp7Ubj13ArJNNT7P2YMPeMFLs/T4mHL1g==
+            -----END PUBLIC KEY-----
+      bob:
+        keys:
+          - |
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEeP9ml21EPiQQtqX2QLXKSc7JxK6
+            Alb1fTv050UCuKRzpXT+OprNL9/q+C6pA7UbDFpw2Hbm6ldwkDtrtqMYWQ==
+            -----END PUBLIC KEY-----
+
+grants:
+  # The first grant, written by spiffex bootstrap: everything, for alice.
+  operators:
+    who: spiffe://example.org/operators/alice
+    can: [read, write, delegate]
+    on: [/]
+
+  # Every operator may read the whole state. Only alice may write /operators, and she holds
+  # read on / already, so nobody can use this grant to gain anything (the closure rule).
+  operators-read:
+    who: spiffe://example.org/operators/*
+    can: [read]
+    on: [/]
+
+  # Every service account of the platform namespace may add, rotate and remove host keys. Whoever
+  # can create a service account or a token in that namespace holds this grant too.
+  platform-hosts:
+    who: spiffe://example.org/prod/ns/platform/sa/*
+    can: [read, write]
+    on: [/hosts]

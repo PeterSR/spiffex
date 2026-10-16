@@ -197,6 +197,13 @@ func (f settingsFlags) load() (state.Settings, error) {
 	if file.Issuer == "" || file.TrustDomain == "" {
 		return state.Settings{}, usageError{errors.New("the issuer URL and trust domain are required: give -issuer and -trust-domain, or a -settings file with both")}
 	}
+	if *f.file != "" {
+		// The whole file is checked as the issuer would, though validation
+		// uses only part of it.
+		if err := file.Check(); err != nil {
+			return state.Settings{}, fmt.Errorf("%s: %w", *f.file, err)
+		}
+	}
 	s, err := file.Validation()
 	if err != nil && *f.file != "" {
 		return state.Settings{}, fmt.Errorf("%s: %w", *f.file, err)

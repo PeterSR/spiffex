@@ -55,7 +55,7 @@ func keyGenerate(args []string) error {
 		return err
 	}
 	if *out == "" {
-		return errors.New("-out is required")
+		return usageError{errors.New("-out is required")}
 	}
 	signer, err := keyset.Generate(keyset.Algorithm(*alg))
 	if err != nil {
@@ -74,7 +74,7 @@ func keyPublic(args []string) error {
 		return err
 	}
 	if *in == "" {
-		return errors.New("-in is required")
+		return usageError{errors.New("-in is required")}
 	}
 	data, err := os.ReadFile(*in)
 	if err != nil {
@@ -119,7 +119,7 @@ func keyAdd(args []string) error {
 		return err
 	}
 	if *dir == "" {
-		return errors.New("-dir is required")
+		return usageError{errors.New("-dir is required")}
 	}
 	k, err := keyset.Add(*dir, keyset.Algorithm(*alg), time.Now())
 	if err != nil {
@@ -189,7 +189,7 @@ func keyList(args []string) error {
 		return err
 	}
 	now := time.Now()
-	active := set.Active(now, delay)
+	active, signing := set.Active(now, delay)
 	retired := map[string]bool{}
 	for _, k := range set.Retired(now, delay, retention) {
 		retired[k.ID] = true
@@ -197,14 +197,19 @@ func keyList(args []string) error {
 	for _, k := range set.Keys() {
 		state := "verifying only"
 		switch {
-		case k.ID == active.ID:
+		case k.Exposed:
+			state = "exposed, verifying only"
+		case signing && k.ID == active.ID:
 			state = "signing"
 		case retired[k.ID]:
 			state = "retired, can be pruned"
-		case k.Created.After(active.Created):
+		case !signing || k.Created.After(active.Created):
 			state = fmt.Sprintf("signs from %s", k.Published.Add(delay).Format(time.RFC3339))
 		}
 		fmt.Printf("%s  %s  %s  %s\n", k.File, k.Algorithm, k.ID, state)
+	}
+	if !signing && len(set.Keys()) > 0 {
+		fmt.Fprintln(os.Stderr, "no key can sign: every key is exposed or still within its activation delay")
 	}
 	return nil
 }

@@ -35,6 +35,8 @@ management token every time instead of reusing one.
 
 Each issuer process remembers, until they expire, the tokens of the changes it authorized; a
 refused request does not use its token up, so callers without permission cannot fill that record.
+If callers with permission ever fill it (65536 changes within five minutes), further changes are
+answered `503` until entries expire, rather than forgetting a token that could then be used again.
 **The record is per process and not shared.** With several issuer processes, as in the Kubernetes
 example with its two replicas, an intercepted management token could make one change on each
 process within its five minutes. Keep management tokens as private as the identity behind them.
@@ -46,6 +48,7 @@ answered `429` with `Retry-After`.
 
 A grant gives identities matching `who` the permissions in `can` on the scopes in `on`:
 
+<!-- check: state -->
 ```yaml
 grants:
   operators:
@@ -72,7 +75,10 @@ grants, and a grant at most 16 scopes, which keeps checking them quick.
 | `write` | creating, changing and removing origins and their members; with scope `/`, also providers |
 | `delegate` | creating, changing and removing grants |
 
-`write` and `delegate` include `read`. Providers can be read by every caller.
+`write` and `delegate` include `read`. Providers can be read by every caller: every identity the
+issuer issues may call the API, and `get state` and `get provider` show it every provider, an exec
+verifier's command line included. Providers are not secret (SPEC section 4), so never put a secret
+in one.
 
 Three more rules close the obvious loopholes:
 
@@ -93,6 +99,7 @@ other grant gives, through a single grant whose `who` covers the writer's.
 
 An example the issuer refuses:
 
+<!-- check: state invalid -->
 ```yaml
 grants:
   ci-writers:
@@ -185,13 +192,14 @@ spiffex manage -issuer https://issuer.example.org get state
 
 Flags may come before or after the command. Every answer that returns or changes the state carries
 its version, which `get` prints to standard error and `put` and `delete` print with their result.
-Pass it back as `-if-match VERSION` to make a change only if nobody else changed the state since:
+Pass it back as `-if-match VERSION` to make a change only if nobody else changed the state since
+(the API's `If-Match` header; `*` there matches any state that exists):
 
 ```bash
-$ spiffex manage ... get origin web > web.yaml
+$ spiffex manage ... get origin web > web.json
 version "41"
-$ vi web.yaml
-$ spiffex manage ... put origin web -f web.yaml -if-match 41
+$ vi web.json
+$ spiffex manage ... put origin web -f web.json -if-match 41
 updated origin web, version "42"
 ```
 
@@ -204,13 +212,16 @@ spiffex: grant cluster-writers: 422 Unprocessable Entity: the change would make 
 
 | Status | Meaning |
 |---|---|
+| 400 | the body is not one JSON value of the expected shape, or has unknown fields |
 | 401 | no token, or not a valid management token for an identity the state still issues |
 | 403 | you may read the object, but lack a permission the change needs; the reason names it |
 | 404 | the object does not exist, or you may not read it |
 | 409 | the name, prefix or upstream issuer and audience is taken by an object you may not read |
 | 412 | the state is no longer at the version `-if-match` named |
+| 413 | the body is larger than 1 MiB |
 | 422 | the change would make the state invalid; the reasons follow |
 | 429 | too many requests from you; try again after `Retry-After` |
+| 503 | the stored state cannot be read or is invalid, a change kept losing to others, or too many recent changes are remembered |
 
 Reasons never describe what you may not read, beyond the names and prefixes of origins and the
 upstream issuer and audience of `jwt` origins, which are not secret. A closure problem involving a

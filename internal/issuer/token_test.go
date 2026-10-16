@@ -20,6 +20,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -410,6 +411,29 @@ func TestTokenRequestValidation(t *testing.T) {
 			t.Errorf("status %d: %v", resp.status, resp.body)
 		}
 	})
+	// scope and resource are ignored, and resource, like audience, may
+	// repeat (SPEC section 3).
+	t.Run("scope and resource ignored", func(t *testing.T) {
+		v := good()
+		v.Set("scope", "openid admin")
+		v.Add("resource", "https://api.example.org")
+		v.Add("resource", "https://other.example.org")
+		resp := f.post(t, v)
+		if resp.status != http.StatusOK {
+			t.Fatalf("status %d: %v", resp.status, resp.body)
+		}
+		if aud := claimsOf(t, resp.body["access_token"].(string)).Audience; len(aud) != 1 || aud[0] != "orders" {
+			t.Errorf("aud = %v, want only the requested audience", aud)
+		}
+	})
+	t.Run("repeated scope", func(t *testing.T) {
+		v := good()
+		v.Add("scope", "a")
+		v.Add("scope", "b")
+		if resp := f.post(t, v); resp.status != http.StatusBadRequest || resp.body["error"] != "invalid_request" {
+			t.Errorf("status %d, body %v; want 400 invalid_request", resp.status, resp.body)
+		}
+	})
 	t.Run("JSON body", func(t *testing.T) {
 		resp, err := http.Post(f.iss.TokenEndpoint(), "application/json", strings.NewReader("{}"))
 		if err != nil {
@@ -706,5 +730,115 @@ func TestClientAddress(t *testing.T) {
 		if got := iss.clientAddress(r).String(); got != c.want {
 			t.Errorf("peer %s, X-Forwarded-For %q: %s, want %s", c.peer, c.xff, got, c.want)
 		}
+	}
+}
+
+// Behind a trusted proxy, the per-address verifier limit applies to the
+// client X-Forwarded-For names, not to the proxy.
+func TestVerifierLimitPerForwardedClient(t *testing.T) {
+	f := newTokenFixture(t)
+	runner, err := verifier.NewRunner(verifier.Limits{PerOrigin: 4, Total: 4, PerAddressPerMinute: 1, PerAddressBurst: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := f.iss.cfg
+	cfg.Verifiers = runner
+	cfg.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
+	if f.iss, err = New(cfg); err != nil {
+		t.Fatal(err)
+	}
+	f.srv.Config.Handler = f.iss.Handler()
+
+	post := func(client string) int {
+		t.Helper()
+		form := exchangeForm("i-0abc", TokenTypeExec, func(v url.Values) { v.Set("origin", "aws") })
+		req, err := http.NewRequest(http.MethodPost, f.iss.TokenEndpoint(), strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("X-Forwarded-For", client)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for i := range 2 {
+		if s := post("198.51.100.7"); s != http.StatusOK {
+			t.Fatalf("request %d within the burst: status %d", i, s)
+		}
+	}
+	if s := post("198.51.100.7"); s != http.StatusInternalServerError {
+		t.Errorf("a request over the client's limit: status %d, want 500", s)
+	}
+	if s := post("198.51.100.8"); s != http.StatusOK {
+		t.Errorf("another client behind the same proxy: status %d, want 200", s)
+	}
+}
+
+// An exposed key stays published but never signs: the newest key that is not
+// exposed does, and with every key exposed the token endpoint refuses with
+// server_error rather than sign.
+func TestExposedKeysNeverSign(t *testing.T) {
+	f := newTokenFixture(t)
+	dir := t.TempDir()
+	older, err := keyset.Add(dir, keyset.ES256, f.now.Add(-48*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := keyset.Add(dir, keyset.ES256, f.now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := keyset.LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	use := func(exposed ...string) {
+		keys := loaded.Keys()
+		for i := range keys {
+			keys[i].Exposed = slices.Contains(exposed, keys[i].ID)
+		}
+		set, err := keyset.NewSet(keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.iss.cfg.Keys = staticKeys{set: set, seq: 2}
+	}
+	request := func() response {
+		return f.post(t, f.form("vms/billing", sign(t, f.ecKey, jose.ES256, f.claims("vms/billing")), "orders"))
+	}
+	kid := func(token string) string {
+		parsed, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.ES256})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed.Headers[0].KeyID
+	}
+
+	use(newer.ID)
+	resp := request()
+	if resp.status != http.StatusOK {
+		t.Fatalf("status %d: %v", resp.status, resp.body)
+	}
+	if got := kid(resp.body["access_token"].(string)); got != older.ID {
+		t.Errorf("signed with %s, want the older key, as the newer one is exposed", got)
+	}
+	jwks, err := http.Get(f.iss.URL() + "/jwks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(jwks.Body)
+	jwks.Body.Close()
+	if !strings.Contains(string(body), newer.ID) {
+		t.Error("the exposed key is no longer published")
+	}
+
+	use(older.ID, newer.ID)
+	resp = request()
+	if resp.status != http.StatusInternalServerError || resp.body["error"] != "server_error" {
+		t.Errorf("with every key exposed: status %d, body %v; want 500 server_error", resp.status, resp.body)
 	}
 }

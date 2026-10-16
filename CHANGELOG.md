@@ -7,57 +7,49 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+The first version: an issuer, an agent and the `spiffex` command, following version 0 of
+[the specification](SPEC.md).
+
 ### Added
 
-- The issuer: OIDC discovery and RFC 8414 metadata, a JWKS, a SPIFFE bundle endpoint, and a token
-  endpoint that issues JWT-SVIDs to workloads authenticating with `private_key_jwt`.
-- Signing keys as a directory of PEM files, reloaded while running, with activation delays and
-  retirement so rotation never breaks a verifier.
-- The agent: the JWT-SVID half of the SPIFFE Workload API on a Unix socket, for one workload, backed
-  by the issuer. Stock go-spiffe and py-spiffe clients work against it unchanged.
-- Token exchange: workloads trade a token from a trusted upstream (a Kubernetes service account
-  token, a GitHub Actions or cloud identity token) for a JWT-SVID. The token's issuer and audience
-  select exactly one origin, whose keys verify it and whose admission and name template decide the
-  SPIFFE ID.
-- Exec origins: proofs spiffex does not understand itself are checked by a verifier program the
-  operator installs, run without a shell, with an empty environment, in a process group of its own
-  and with a deadline, within per-origin, global and per-client-address limits.
-- The `spiffex` command: `issuer`, `agent`, `token`, `health`, `key` (generate workload keys and
-  print their public halves; add, list and prune signing keys) and `dev`, which sets up a local
-  trust domain, settings and state to try spiffex with. Every flag can also be set from the
-  environment. The agent and `token` take a proof from a file or from a command run for each
-  request, as a JWT or for an exec origin.
-- The issuer runs on the state: workloads with keys are members of `keys` origins, with client ids
-  `<origin>/<member>`, and origins may restrict the audiences their identities request. The state is
-  kept in a file, a directory tree with one file per object, or a Kubernetes ConfigMap read through
-  the API, and is reread while the issuer runs; an invalid state leaves the last valid one in
-  service. Writes to every form are compare-and-swap, ready for the management API.
-- The issuer's settings file: issuer URL, trust domain, signing keys, token lifetime (at most an
-  hour), where the state lives, the files and verifiers the state may use (bearer tokens limited to
-  hosts and paths), key fetching that can refuse private addresses with named exceptions, verifier
-  limits, the user verifiers run as, and the proxies trusted to name clients. Unknown fields are
-  refused.
-- The issuer rereads its signing keys and its TLS certificate while running.
-- Example Kubernetes manifests, with the state in a ConfigMap that is all the issuer may read and
-  update, the agent as a native sidecar started behind a `spiffex health` probe, and an end-to-end
-  test on kind that covers the management API.
-- The state model: origins, providers and grants in one document, with the shipped `keys`,
-  `kubernetes`, `github`, `gitlab` and `oidc` providers as plain provider documents, JSON Schemas
-  for the state, a provider and an origin, and full offline validation, the grant closure rule
-  included. `spiffex check` validates a state, a provider or an origin, `spiffex provider` lists
-  and prints the shipped providers, and `spiffex explain` shows how the state would treat a subject
-  token.
-- The management API, served with `management: true`: SPIFFE identities change origins, members,
-  providers and grants while the issuer runs, authenticated by a five-minute JWT-SVID for
-  `<issuer>/manage` that is refused once its member or origin is gone and makes one authorized change
-  per process. At most 256 grants per state and 16 scopes per grant keep the closure check quick.
-  Grants give `read`, `write` and `delegate` on path scopes, with no escalation and the closure rule
-  enforced; answers hide what the caller may not read; changes are compare-and-swap with ETags and
-  `If-Match`, validated as a whole, logged, and served by the storing process at once. The agent
-  fetches a fresh management token for every request instead of reusing one.
-- `spiffex bootstrap` writes the first origin, member and grant to the stored state;
-  `spiffex state` exports, imports and converts it; `spiffex manage` is a client for the management
-  API, with tokens from a Workload API socket or from the token endpoint.
+- **The issuer.** OIDC discovery and RFC 8414 metadata, a JWKS, a SPIFFE bundle endpoint, and a
+  token endpoint that issues JWT-SVIDs for two grants: client credentials with `private_key_jwt`,
+  and token exchange of a proof the workload already has. Signing keys are a directory of PEM
+  files, reread while running, with an activation delay and retirement so that rotation never
+  breaks a verifier. The TLS certificate is reloaded when it changes.
+- **The state.** Origins, providers and grants in one document, kept in a file, a directory tree
+  with one file per object, or a Kubernetes ConfigMap, and reread while the issuer runs. A new
+  state is put in service as a whole, and an invalid one leaves the last valid state in service.
+  JSON Schemas for the state, a provider and an origin, and full offline validation, the grant
+  closure rule included.
+- **Origins and providers.** `keys` origins for workloads that hold a private key, with client ids
+  `<origin>/<member>`; `jwt` origins for tokens from upstreams such as Kubernetes and CI providers,
+  whose keys are fetched within fixed limits and, by default, only from public addresses; and `exec`
+  origins, whose proofs a verifier program installed by the operator checks, run without a shell
+  and with a deadline, within per-origin, global and per-client-address limits. Shipped providers
+  `keys`, `kubernetes`, `github`, `gitlab` and `oidc`, as plain provider documents. Shared
+  upstreams must pin an owner. Origins may restrict the audiences their identities request.
+- **The management API**, at `<issuer>/manage` with `management: true`. SPIFFE identities change
+  origins, members, providers and grants while the issuer runs, with five-minute JWT-SVIDs for the
+  management audience. Grants give `read`, `write` and `delegate` on path scopes, with no
+  escalation and the closure rule enforced. Answers hide what the caller may not read, and changes
+  are compare-and-swap with ETags and `If-Match`, validated as a whole and logged.
+- **The issuer's settings file**: issuer URL, trust domain, signing keys, token lifetime, where the
+  state lives, the local files and verifiers the state may use, key fetching, verifier limits and
+  the user verifiers run as, and the proxies trusted to name clients. Unknown fields are refused.
+- **The agent.** The JWT-SVID half of the SPIFFE Workload API on a Unix socket, for one workload.
+  Stock go-spiffe and py-spiffe clients work against it unchanged. It proves its workload with a
+  private key, or with a proof read from a file or made by a command for each request.
+- **The `spiffex` command**: `issuer`, `agent`, `token`, `health` for container probes, `key` for
+  workload and signing keys, `check` to validate a state, provider or origin, `provider` to read
+  the shipped providers, `explain` to show how the state treats a subject token, `bootstrap` for
+  the first grant, `state` to export, import and convert the stored state, `manage` as a client of
+  the management API, and `dev` for a local trust domain to try spiffex with. Every flag can also
+  be set from the environment.
+- Example Kubernetes manifests, with the state in a ConfigMap and the agent as a native sidecar,
+  and an end-to-end test on kind.
+- Documentation of configuration, providers and verifiers, Kubernetes and the management API, and
+  an example multi-origin setup. A test validates the examples and the documentation's examples.
 - A conformance matrix: tokens from stock go-spiffe, py-spiffe and plain OAuth 2.0 clients verify
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.

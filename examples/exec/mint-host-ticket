@@ -1,0 +1,25 @@
+#!/usr/bin/python3
+"""Stands in for the provisioning service, to try host-ticket-verifier with.
+
+mint-host-ticket AUDIENCE HOST SITE prints a host ticket that is valid for two minutes, made with
+the key in KEY_FILE.
+"""
+import base64
+import hashlib
+import hmac
+import json
+import sys
+import time
+
+KEY_FILE = "/etc/spiffex/host-ticket.key"
+
+
+def b64(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+audience, host, site = sys.argv[1:4]
+with open(KEY_FILE, "rb") as f:
+    key = f.read().strip()
+payload = b64(json.dumps({"aud": audience, "exp": int(time.time()) + 120, "host": host, "site": site}).encode())
+print(payload + "." + b64(hmac.new(key, payload.encode(), hashlib.sha256).digest()))

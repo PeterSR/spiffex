@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/PeterSR/spiffex/internal/manage"
 	"github.com/PeterSR/spiffex/internal/policy"
 	"github.com/PeterSR/spiffex/internal/procgroup"
+	"github.com/PeterSR/spiffex/internal/secretperm"
 	"github.com/PeterSR/spiffex/internal/settings"
 	"github.com/PeterSR/spiffex/internal/store"
 	"github.com/PeterSR/spiffex/internal/verifier"
@@ -32,7 +34,7 @@ func runIssuer(ctx context.Context, args []string) error {
 		return err
 	}
 	if *configPath == "" {
-		return errors.New("-config is required")
+		return usageError{errors.New("-config is required")}
 	}
 	if (*tlsCert == "") != (*tlsKey == "") {
 		return errors.New("-tls-cert and -tls-key go together")
@@ -86,11 +88,24 @@ func runIssuer(ctx context.Context, args []string) error {
 		if err := procgroup.CheckKill(exe, u.UID, u.GID); err != nil {
 			return fmt.Errorf("verifier_user: %w", err)
 		}
+		secrets := []string{}
+		if *tlsKey != "" {
+			secrets = append(secrets, *tlsKey)
+		}
+		verifierUser := secretperm.User{UID: u.UID, GID: u.GID}
+		if err := secretperm.CheckFiles(verifierUser, s.KeysDir, secrets...); err != nil {
+			return fmt.Errorf("verifier_user: %w", err)
+		}
+		keys.CheckNewKeys(func(path string) error { return secretperm.Check(verifierUser, path) })
 		limits.User = &verifier.User{UID: u.UID, GID: u.GID}
 	}
 	runner, err := verifier.NewRunner(limits)
 	if err != nil {
 		return err
+	}
+	if len(s.Validation.Verifiers) > 0 && s.VerifierUser == nil {
+		logger.Warn("EXEC VERIFIERS RUN AS THE ISSUER'S OWN USER AND CAN READ ITS SIGNING KEYS: a verifier that is compromised can sign any identity. Set verifier_user to run them as a user that cannot read keys_dir or the TLS key",
+			"verifiers", len(s.Validation.Verifiers), "keys_dir", s.KeysDir)
 	}
 	if len(s.Validation.Verifiers) > 0 {
 		// Whatever a verifier leaves behind is then adopted, killed and
@@ -130,9 +145,14 @@ func runIssuer(ctx context.Context, args []string) error {
 	go store.Watch(ctx, stateStore, snap.Version, *reload, logger, pol)
 	go func() { _ = keys.Run(ctx, *reload) }()
 
+	// Requests' contexts end at the shutdown deadline at the latest, and
+	// with them the verifiers they run.
+	requests, endRequests := context.WithCancel(context.Background())
+	defer endRequests()
 	// The write timeout leaves room for a token request whose exec verifier
 	// runs for the longest timeout a provider may set.
 	srv := &http.Server{
+		BaseContext:       func(net.Listener) context.Context { return requests },
 		Addr:              *listen,
 		Handler:           iss.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -171,12 +191,42 @@ func runIssuer(ctx context.Context, args []string) error {
 	}()
 	select {
 	case err := <-errc:
+		// The server failed: no request can finish now.
+		endRequests()
+		drainVerifiers(runner, logger)
 		return err
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return shutdown(srv, endRequests, runner, logger, shutdownGrace)
+}
+
+// shutdownGrace is how long requests get to finish when the issuer stops,
+// and verifierDrain how long their verifiers then get to be killed and
+// reaped.
+const (
+	shutdownGrace = 10 * time.Second
+	verifierDrain = 5 * time.Second
+)
+
+// shutdown stops the server, gives requests until the deadline to finish,
+// then cancels those left, killing their verifiers, and waits for those to
+// be gone, so none outlives the issuer.
+func shutdown(srv *http.Server, endRequests context.CancelFunc, runner *verifier.Runner, logger *slog.Logger, deadline time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	err := srv.Shutdown(ctx)
+	endRequests()
+	drainVerifiers(runner, logger)
+	return err
+}
+
+// drainVerifiers waits a bounded time for running verifiers to finish, and
+// logs those that do not: one that ignores the kill must not keep the
+// issuer from exiting.
+func drainVerifiers(runner *verifier.Runner, logger *slog.Logger) {
+	if left := runner.Close(verifierDrain); len(left) > 0 {
+		logger.Error("verifiers still run after they were killed; the issuer exits without them", "running_by_origin", left)
+	}
 }
 
 // sweepOrphans reaps, every interval, descendants that left their

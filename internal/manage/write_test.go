@@ -241,3 +241,25 @@ func TestEmptyStateAdmitsNobody(t *testing.T) {
 		t.Errorf("version %q", v)
 	}
 }
+
+func TestIfMatch(t *testing.T) {
+	cases := []struct {
+		header, version string
+		want            bool
+	}{
+		{`*`, "41", true},
+		{`*`, "", false},
+		{`"41"`, "41", true},
+		{`"40", "41"`, "41", true},
+		{`"40"`, "41", false},
+		{`W/"41"`, "41", false},
+		{`""`, "", true},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest(http.MethodPut, "/manage/origins/x", nil)
+		r.Header.Set("If-Match", c.header)
+		if got := ifMatch(r, c.version); got != c.want {
+			t.Errorf("If-Match %s against version %q: %v, want %v", c.header, c.version, got, c.want)
+		}
+	}
+}

@@ -51,8 +51,11 @@ func TestLoadDefaults(t *testing.T) {
 	if p := s.Validation.BearerTokenFiles[0].Paths; strings.Join(p, ",") != "/openid/v1/jwks,/.well-known/openid-configuration" {
 		t.Errorf("the default bearer token file goes to paths %v", p)
 	}
-	if s.RefusePrivateAddresses || s.Management {
-		t.Error("an option is on by default")
+	if s.Management {
+		t.Error("the management API is on by default")
+	}
+	if !s.RefusePrivateAddresses || strings.Join(s.AllowPrivateHosts, ",") != "kubernetes.default.svc.cluster.local:443" {
+		t.Errorf("private addresses: refused %v, exempt %v; want refused but for the in-cluster API server", s.RefusePrivateAddresses, s.AllowPrivateHosts)
 	}
 }
 
@@ -71,7 +74,7 @@ bearer_token_files:
   - { path: /var/run/secrets/tokens/upstream, hosts: [idp.partner.example, "idp.partner.example:8443"], paths: [/keys] }
 verifiers:
   - [/usr/libexec/spiffex/aws-verifier, --region, eu-north-1]
-fetch: { refuse_private_addresses: true, allow_private_hosts: [kubernetes.default.svc.cluster.local] }
+fetch: { refuse_private_addresses: true, allow_private_hosts: [Kubernetes.default.svc.cluster.local, "idp.internal:8443", "[fd00::1]:443", "fd00::2"] }
 verifier_user: { uid: 65533, gid: 65533 }
 trusted_proxies: [10.0.0.0/8, "2001:db8::1"]
 verifier_limits: { per_origin: 2, total: 8, per_address_per_minute: 30, per_address_burst: 5 }
@@ -85,7 +88,10 @@ verifier_limits: { per_origin: 2, total: 8, per_address_per_minute: 30, per_addr
 	if len(s.Validation.ReadableFiles) != 1 || len(s.Validation.Verifiers[0]) != 3 || s.Validation.BearerTokenFiles[0].Hosts[1] != "idp.partner.example:8443" {
 		t.Errorf("validation settings = %+v", s.Validation)
 	}
-	if len(s.AllowPrivateHosts) != 1 || s.VerifierUser == nil || s.VerifierUser.UID != 65533 ||
+	if strings.Join(s.AllowPrivateHosts, ",") != "kubernetes.default.svc.cluster.local:443,idp.internal:8443,[fd00::1]:443,[fd00::2]:443" {
+		t.Errorf("allow_private_hosts = %v", s.AllowPrivateHosts)
+	}
+	if s.VerifierUser == nil || s.VerifierUser.UID != 65533 ||
 		len(s.TrustedProxies) != 2 || s.TrustedProxies[1].String() != "2001:db8::1/128" ||
 		s.Validation.BearerTokenFiles[0].Paths[0] != "/keys" {
 		t.Errorf("settings = %+v", s)
@@ -114,6 +120,8 @@ func TestLoadErrors(t *testing.T) {
 		"per origin over total":     minimal + "verifier_limits: { per_origin: 9, total: 3 }\n",
 		"bearer path not a path":    minimal + "bearer_token_files: [{ path: /token, hosts: [h], paths: [keys] }]\n",
 		"bad private host":          minimal + "fetch: { allow_private_hosts: [\"a/b\"] }\n",
+		"private host port 0":       minimal + "fetch: { allow_private_hosts: [\"a:0\"] }\n",
+		"private host bad port":     minimal + "fetch: { allow_private_hosts: [\"a:https\"] }\n",
 		"verifier user without gid": minimal + "verifier_user: { uid: 1 }\n",
 		"bad trusted proxy":         minimal + "trusted_proxies: [nope]\n",
 		"no trust domain":           strings.Replace(minimal, "trust_domain: example.org", "", 1),

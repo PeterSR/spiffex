@@ -2,10 +2,12 @@
 
 The issuer reads two things: its **settings**, a file only the operator changes, which take effect
 on restart; and its **state**, the origins, providers and grants of [SPEC.md section 6](../SPEC.md#6-state),
-which it rereads while it runs.
+which it rereads while it runs. [examples/](../examples) has a complete settings file and state for
+an issuer with several origins.
 
 ## The settings file
 
+<!-- check: settings -->
 ```yaml
 issuer: https://issuer.example.org     # the issuer URL; tokens carry it as iss
 trust_domain: example.org
@@ -32,16 +34,17 @@ verifiers:                             # the exec verifiers installed; none by d
   - [/usr/libexec/spiffex/aws-verifier, --partition, aws]
 
 fetch:
-  refuse_private_addresses: false      # refuse key fetches to loopback, link-local and private addresses
-  allow_private_hosts: []              # hosts exempt from that, such as kubernetes.default.svc.cluster.local
+  refuse_private_addresses: true       # refuse key fetches to loopback, link-local and private addresses (default true)
+  allow_private_hosts:                 # host:port pairs exempt from that, port 443 when left out
+    - kubernetes.default.svc.cluster.local:443   # the default, for the shipped kubernetes provider
 
 verifier_limits:                       # bounds on exec verifiers (SPEC section 5.4)
   per_origin: 4                        # running at once for one origin
   total: 16                            # running at once in all
   per_address_per_minute: 60           # how often one client address may start one
   per_address_burst: 10                # and how many in a row
-verifier_user: { uid: 65533, gid: 65533 }   # optional: run verifiers as this user, without supplementary groups
-trusted_proxies: [10.0.0.0/8]          # optional: peers whose X-Forwarded-For names the client
+verifier_user: { uid: 65533, gid: 65533 }   # recommended with verifiers: run them as this user, without supplementary groups
+trusted_proxies: [10.0.0.0/8]          # optional: peers, such as an ingress, whose X-Forwarded-For names the client
 ```
 
 Run the issuer with `spiffex issuer -config issuer.yaml`. Relative paths in `keys_dir` and `state`
@@ -51,18 +54,44 @@ HTTP otherwise, for use behind a TLS-terminating proxy, and reloads the TLS cert
 files change. The issuer URL must be what clients and verifiers actually reach, because it is
 compared byte for byte.
 
-`refuse_private_addresses` checks the address actually connected to, after name resolution, and
-judges an IPv6 address that carries an IPv4 one (NAT64, 6to4, IPv4-compatible) by the latter. It
-then ignores any HTTP proxy, since a proxy would hide the destination. Hosts in
-`allow_private_hosts` are exempt, compared with the URL's host name; list
-`kubernetes.default.svc.cluster.local` there for the shipped `kubernetes` provider.
+Key fetches for origins refuse loopback, link-local, private and other non-public addresses unless
+`refuse_private_addresses` is `false`. The check is on the address actually connected to, after
+name resolution, and an IPv6 address that carries an IPv4 one (NAT64, 6to4, IPv4-compatible) is
+judged by the latter. While it is on, any HTTP proxy is ignored, since a proxy would hide the
+destination. The `allow_private_hosts` entries are exempt: each is a host and port, compared with
+the host and port of the URL fetched, with port 443 when it names none. The default list exempts
+`kubernetes.default.svc.cluster.local:443`, the in-cluster API server the shipped `kubernetes`
+provider reads keys from; a list you give replaces it, so keep that entry when you need it.
 
-`verifier_user` needs the issuer to run with the privilege to change user (CAP_SETUID and
+**Verifiers and the signing keys.** An exec verifier runs as the issuer's own user unless
+`verifier_user` is set, and can then read everything the issuer can, the signing keys included: a
+compromised verifier could sign any identity. The issuer logs a warning at startup when verifiers are
+installed without `verifier_user`. With it, the issuer refuses to start when that user, by its uid
+or gid, could read any file in `keys_dir` or the TLS key, judged by each file's owner and mode bits
+and its POSIX ACL: a file with an ACL naming further users or groups counts as readable unless the
+ACL's mask grants nothing. A default ACL on `keys_dir` that would let the user read new files is
+refused too. Keep those files readable by the issuer's user or group only, for instance mode `0440`
+with a group the verifier user is not in, and without ACLs. Each time the issuer rereads `keys_dir`,
+a new key the verifier user could read is logged as an error and neither published nor signed with.
+A key already in service that becomes readable is marked exposed: it stays published, so the tokens
+it signed still verify, but it never signs again while it stays in the directory, and the newest key
+that is not exposed signs instead. With every key exposed, the token endpoint answers `server_error`
+until you add a fresh key. A key removed and added back is checked like a new one. `verifier_user` also needs the issuer to run with the privilege to change user (CAP_SETUID and
 CAP_SETGID), and to kill processes of that user (CAP_KILL), or a hung verifier could never be
-stopped. The issuer checks this at startup, by starting a process as that user and killing it,
-and refuses to start when it cannot. `trusted_proxies` matters
-for the per-address verifier limit: behind a trusted proxy, the client is the rightmost address in
-`X-Forwarded-For` that is not itself a trusted proxy.
+stopped. The issuer checks this at startup, by starting a process as that user and killing it, and
+refuses to start when it cannot.
+
+**Behind an ingress or load balancer**, list its addresses in `trusted_proxies`. The per-address
+verifier limit then applies to the client the proxy names: the rightmost address in
+`X-Forwarded-For` that is not itself a trusted proxy. Without it, every request seems to come from
+the proxy, and one busy client uses up the limit for all. Never list addresses that clients can
+send from directly, or they can name any client they like. IPv6 clients are limited by their /64,
+and each /48 as a whole by sixteen times the per-address limit, so moving between addresses or
+/64s gains little.
+
+When the issuer stops, it gives requests ten seconds to finish, then cancels those left, killing
+their verifiers, and waits up to five seconds more for them to be gone. A verifier still running
+then, one that somehow survived the kill, is logged, and the issuer exits without it.
 
 Every flag of every command can also be set as an environment variable: `-reload-interval` is
 `SPIFFEX_RELOAD_INTERVAL`, and so on. The names are shared between commands, so `SPIFFEX_DIR` means
@@ -72,7 +101,8 @@ from the environment.
 ## The state
 
 The state starts out empty, and an empty state admits nobody. A state that does not exist yet is
-empty, too. The issuer checks the state every `-reload-interval` (10 seconds by default):
+empty, too. A file or directory is created on the first write; a ConfigMap is not, so that the
+issuer needs no permission to create objects: create it first, even without a `state.yaml` key. The issuer checks the state every `-reload-interval` (10 seconds by default):
 
 - A valid new state is put in service as a whole; requests already running finish with the old one.
 - An invalid state is not. The issuer keeps serving the last valid state and logs the problems,
@@ -84,7 +114,9 @@ empty, too. The issuer checks the state every `-reload-interval` (10 seconds by 
   whole and is taken up at the next check.
 
 `spiffex check -settings issuer.yaml state.yaml` runs the same validation as the issuer, without
-one; `spiffex explain` shows how the state would treat a given subject token.
+one, and checks the settings file as the issuer would, though without requiring `keys_dir` and
+`state`; `spiffex explain` shows how the state would treat a given subject token. Origins, the
+providers they use and how to write your own are in [providers.md](providers.md).
 
 With `management: true`, SPIFFE identities holding grants change the state through the management
 API, and the issuer stores what they change, so it needs write access to the state. The issuer that
@@ -119,12 +151,19 @@ A `keys` origin lists workloads that hold a private key, each a member:
 spiffex key generate -out billing.key > billing.pub
 ```
 
+<!-- check: state -->
 ```yaml
 origins:
   vms:
     provider: keys
     members:
-      billing: { keys: ["-----BEGIN PUBLIC KEY-----\n..."] }
+      billing:
+        keys:
+          - |
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEeMs6PtCLLbQKPBYlHNZ1qOhtZmqA
+            qMfrEWbOfPLgAAByHe3Rn/PDiv7t8NGs6znhbm6vMUOx7EjavC8uVIHnVA==
+            -----END PUBLIC KEY-----
 ```
 
 `billing.key` stays with the workload and nowhere else. The workload's client id is
@@ -137,8 +176,10 @@ instead of the default ECDSA P-256 key.
 
 A `jwt` origin lets workloads trade a token they already have for a JWT-SVID. The shipped providers
 cover Kubernetes (`kubernetes`), GitHub Actions (`github`), GitLab (`gitlab`) and any public OIDC
-issuer (`oidc`); `spiffex provider list` and `spiffex provider show NAME` print them.
+issuer (`oidc`); `spiffex provider list` and `spiffex provider show NAME` print them, and
+[providers.md](providers.md) describes their parameters.
 
+<!-- check: state -->
 ```yaml
 origins:
   ci:
@@ -160,17 +201,17 @@ For a Kubernetes cluster, see [kubernetes.md](kubernetes.md).
 
 ## Proofs checked by a verifier
 
-An `exec` origin hands the proof to a local program, the verifier, which answers with claims
-(SPEC section 5.4). Only verifiers listed in the settings can be named by a provider, with exactly
-the same arguments. A verifier runs without a shell, with an empty environment, and with standard
+An `exec` origin hands the proof to a local program, the verifier, which answers with claims. Only
+verifiers listed under `verifiers` in the settings can be named by a provider, with exactly the
+same arguments. A verifier runs without a shell, with an empty environment, and with standard
 input, output and error only, in a process group of its own that is killed at its timeout and
 whenever it finishes. With verifiers installed, the issuer on Linux adopts and reaps whatever they
-leave behind, also as a container's init. It reads
-the request as JSON on standard input and must print one JSON object with a `claims` member.
+leave behind, also as a container's init.
 
-Workloads ask for such an origin by name: `-subject-token-type exec -origin aws` on the agent or
+Workloads ask for such an origin by name: `-subject-token-type exec -origin fleet` on the agent or
 `spiffex token`, or the form parameters `subject_token_type=urn:spiffex:token-type:exec` and
-`origin=aws`.
+`origin=fleet`. [providers.md](providers.md#the-exec-proof) has the protocol and an example
+verifier.
 
 ## The agent
 

@@ -73,7 +73,11 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request, c caller, ch *cha
 			return
 		}
 		if !recorded {
-			if !s.replay.use(c.tokenID, c.expires, s.cfg.Now()) {
+			if err := s.replay.use(c.tokenID, c.expires, s.cfg.Now()); errors.Is(err, errReplayFull) {
+				s.cfg.Logger.Warn("refused a write: the record of management tokens is full", "caller", c.id)
+				writeError(w, errorf(http.StatusServiceUnavailable, "too many writes in the last few minutes; try again later"))
+				return
+			} else if err != nil {
 				s.cfg.Logger.Warn("refused a management token used for a write before", "caller", c.id)
 				writeError(w, errUnauthenticated)
 				return

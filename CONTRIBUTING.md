@@ -8,12 +8,13 @@ specification. Contributions that keep it that way are the most welcome kind.
 | Path | What |
 |---|---|
 | [SPEC.md](SPEC.md) | the specification; as much the product as the code |
-| `cmd/spiffex/` | the `spiffex` command: issuer, agent, keys, a local dev setup |
+| `cmd/spiffex/` | the `spiffex` command: issuer, agent, keys, state tools, a management client, a local dev setup |
 | `internal/` | the implementation, one package per concern |
 | `providers/` | the providers spiffex ships with, as plain provider documents |
 | `schema/` | the JSON Schemas of the state document, a provider and an origin |
 | `conformance/` | the interoperability matrix against stock SPIFFE and OIDC libraries |
-| `docs/` | configuration, operations and Kubernetes |
+| `docs/` | configuration, providers and verifiers, Kubernetes, the management API |
+| `examples/` | complete settings files and states; a test validates them and the examples in `docs/` |
 | `deploy/kubernetes/` | example manifests for the issuer and a workload |
 | `test/e2e/` | the end-to-end test on a kind cluster |
 
@@ -26,6 +27,18 @@ go test ./...
 gofmt -l .        # must print nothing
 go vet ./...
 ```
+
+Many tests start processes: issuers, agents, verifiers, and children of those meant to be killed
+with their process group. A bug in such a test can signal processes it never started, so run tests
+and the conformance matrix in a PID namespace of their own, where they can reach nothing else. On
+Linux, without root:
+
+```bash
+unshare --user --map-current-user --pid --fork --mount --mount-proc sh -c 'go test -race ./...'
+```
+
+YAML blocks in `docs/` that are complete documents carry a `<!-- check: ... -->` marker on the line
+before them, and `go test ./cmd/spiffex` validates them; see `docs_test.go` there for the kinds.
 
 CI also runs `go mod tidy -diff`, staticcheck and govulncheck, and the conformance matrix, which
 needs Go and [uv](https://docs.astral.sh/uv/):

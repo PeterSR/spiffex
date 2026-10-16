@@ -75,9 +75,6 @@ func (s *Server) getProvider(w http.ResponseWriter, r *http.Request, _ caller, b
 	switch {
 	case p != nil:
 		w.Header().Set(ProviderSourceHeader, "state")
-		if _, shipped := state.Shipped(name); shipped {
-			w.Header().Set(OverridesHeader, name)
-		}
 	default:
 		var ok bool
 		if p, ok = state.Shipped(name); !ok {
@@ -85,6 +82,10 @@ func (s *Server) getProvider(w http.ResponseWriter, r *http.Request, _ caller, b
 			return
 		}
 		w.Header().Set(ProviderSourceHeader, "shipped")
+	}
+	// Every override, whichever provider was asked for (SPEC section 8.4).
+	if len(b.overrides) > 0 {
+		w.Header().Set(OverridesHeader, strings.Join(b.overrides, ", "))
 	}
 	writeJSON(w, http.StatusOK, b.version, p)
 }

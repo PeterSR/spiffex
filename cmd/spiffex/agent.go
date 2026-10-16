@@ -126,7 +126,7 @@ func parseCommand(s string) ([]string, error) {
 // issuerTarget validates the issuer flags and returns what discovery needs.
 func (f credentialFlags) issuerTarget() (spiffeid.TrustDomain, *http.Client, error) {
 	if *f.issuerURL == "" {
-		return spiffeid.TrustDomain{}, nil, errors.New("-issuer is required")
+		return spiffeid.TrustDomain{}, nil, usageError{errors.New("-issuer is required")}
 	}
 	var td spiffeid.TrustDomain
 	if *f.trustDomain != "" {
@@ -160,7 +160,7 @@ func runAgent(ctx context.Context, args []string) error {
 		return err
 	}
 	if *socket == "" {
-		return errors.New("-socket is required")
+		return usageError{errors.New("-socket is required")}
 	}
 	mode, err := strconv.ParseUint(*socketMode, 8, 32)
 	if err != nil || mode > 0o777 {

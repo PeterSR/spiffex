@@ -1,0 +1,28 @@
+# Machines that prove themselves with a host ticket from the provisioning service, checked by
+# the exec verifier host-ticket-verifier, which the settings in issuer.yaml install. A machine
+# with host name build-7 at site hel1 gets spiffe://example.org/fleet/hel1/build-7.
+#
+# The machine's agent asks the provisioning service for a fresh ticket, made for the origin
+# audience https://issuer.example.org/origins/fleet, for every request:
+#
+#   spiffex agent -issuer https://issuer.example.org -socket /run/spiffex/agent.sock \
+#     -subject-token-type exec -origin fleet -subject-token-command /usr/local/bin/get-host-ticket
+
+providers:
+  host-ticket:
+    description: Machines holding a host ticket from the provisioning service, by site and host name.
+    params:
+      sites: { type: list, default: ["*"] }
+    proof:
+      exec:
+        command: [/usr/libexec/spiffex/host-ticket-verifier]
+        timeout: 2s
+        shared: false      # only the provisioning service makes tickets
+    require: [host, site]
+    match: { site: $sites }
+    name: "{site}/{host}"
+
+origins:
+  fleet:
+    provider: host-ticket
+    with: { sites: [hel1, fra2] }

@@ -62,6 +62,10 @@ type Key struct {
 	Signer    crypto.Signer
 	// File is the base name of the file the key was loaded from.
 	File string
+	// Exposed marks a key that someone other than the issuer may have been
+	// able to read. It stays published, so the tokens it signed still
+	// verify, but it never signs again.
+	Exposed bool
 }
 
 // Public returns the public half of the key as a JWK.
@@ -108,7 +112,8 @@ func (s *Set) Keys() []Key {
 }
 
 // Active returns the key to sign with at the given time: the newest key
-// published at least activationDelay ago.
+// published at least activationDelay ago that is not exposed. It reports
+// false when every key is exposed: then nothing may sign.
 //
 // When no key qualifies, every key looks recently published. That happens
 // when something rewrote all the key files at once (a Kubernetes Secret
@@ -116,18 +121,23 @@ func (s *Set) Keys() []Key {
 // domain. Active then trusts the creation times in the file names and returns
 // the newest key created at least activationDelay ago, which after a rewrite
 // is the key that was signing before it; failing that, the oldest key.
-func (s *Set) Active(now time.Time, activationDelay time.Duration) Key {
+func (s *Set) Active(now time.Time, activationDelay time.Duration) (Key, bool) {
 	for i := len(s.keys) - 1; i >= 0; i-- {
-		if s.keys[i].activated(now, activationDelay) {
-			return s.keys[i]
+		if !s.keys[i].Exposed && s.keys[i].activated(now, activationDelay) {
+			return s.keys[i], true
 		}
 	}
 	for i := len(s.keys) - 1; i >= 0; i-- {
-		if !s.keys[i].Created.Add(activationDelay).After(now) {
-			return s.keys[i]
+		if !s.keys[i].Exposed && !s.keys[i].Created.Add(activationDelay).After(now) {
+			return s.keys[i], true
 		}
 	}
-	return s.keys[0]
+	for _, k := range s.keys {
+		if !k.Exposed {
+			return k, true
+		}
+	}
+	return Key{}, false
 }
 
 func (k Key) activated(now time.Time, activationDelay time.Duration) bool {
@@ -140,7 +150,10 @@ func (k Key) activated(now time.Time, activationDelay time.Duration) bool {
 // clock skew and the time it takes every issuer process to see a new key.
 // The active key and anything newer are never retired.
 func (s *Set) Retired(now time.Time, activationDelay, retention time.Duration) []Key {
-	active := s.Active(now, activationDelay)
+	active, ok := s.Active(now, activationDelay)
+	if !ok {
+		return nil
+	}
 	var retired []Key
 	for i, k := range s.keys {
 		if k.ID == active.ID || !k.Created.Before(active.Created) {

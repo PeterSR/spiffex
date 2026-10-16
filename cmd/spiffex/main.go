@@ -1,4 +1,5 @@
-// Command spiffex runs the spiffex issuer and agent, and manages their keys.
+// Command spiffex runs the spiffex issuer and agent, and manages their keys
+// and the issuer's state.
 package main
 
 import (
@@ -84,7 +85,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	for _, c := range commands {
-		fmt.Fprintf(w, "  %-9s %s\n", c.name, c.summary)
+		fmt.Fprintf(w, "  %-10s %s\n", c.name, c.summary)
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Run spiffex <command> -h for the flags of a command.")
@@ -110,8 +111,13 @@ func versionString() string {
 func newFlagSet(name, synopsis string) *flag.FlagSet {
 	fs := flag.NewFlagSet("spiffex "+name, flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: spiffex %s %s\n\nFlags (each can also be set as SPIFFEX_<FLAG> in the environment):\n", name, synopsis)
-		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), strings.TrimSpace("Usage: spiffex "+name+" "+synopsis))
+		hasFlags := false
+		fs.VisitAll(func(*flag.Flag) { hasFlags = true })
+		if hasFlags {
+			fmt.Fprintln(fs.Output(), "\nFlags (each can also be set as SPIFFEX_<FLAG> in the environment):")
+			fs.PrintDefaults()
+		}
 	}
 	return fs
 }

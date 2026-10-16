@@ -9,9 +9,6 @@ using the stock SPIFFE libraries through the
 Verifiers, cloud providers included, see an ordinary OpenID Connect issuer. There is no SPIRE
 server, no privileged per-node agent and no registration database to run.
 
-> Status: early development. The [specification](SPEC.md) is a draft and the code is not yet
-> released.
-
 ## Why
 
 SPIFFE gets the identity model right: a SPIFFE ID per workload, short-lived signed documents, trust
@@ -23,7 +20,7 @@ and pass API keys around instead.
 spiffex is the small version:
 
 - **The issuer is an OAuth 2.0 token endpoint.** A workload authenticates with `private_key_jwt` (it
-  holds a private key, the issuer knows only the public key) or exchanges a token it already has: a
+  holds a private key, the issuer knows only the public key) or exchanges a proof it already has: a
   Kubernetes service account token, a GitHub Actions OIDC token, a cloud identity token. The issuer
   maps that proof to a SPIFFE ID and signs a JWT-SVID.
 - **The agent serves one workload.** It sits next to the workload as a sidecar or a local process,
@@ -31,8 +28,35 @@ spiffex is the small version:
   single workload, it needs no workload attestation and no privileges.
 - **The issuer is also an OIDC issuer.** It publishes OIDC discovery, a JWKS and a SPIFFE bundle
   endpoint, so API gateways, SPIFFE libraries and cloud federation (AWS `AssumeRoleWithWebIdentity`,
-  within the limits in [SPEC.md section 7](SPEC.md#7-notes-for-aws-federation)) verify its tokens
+  within the limits in [SPEC.md section 11](SPEC.md#11-notes-for-aws-federation)) verify its tokens
   without any extra component.
+
+## How it decides who is who
+
+The issuer's **state** is one YAML document, which it rereads while it runs:
+
+- An **origin** is one way identities come in: a Kubernetes cluster, GitHub Actions, a set of
+  machines that hold keys. Each origin owns a path, so the cluster `prod` issues
+  `spiffe://example.org/prod/ns/shop/sa/billing` and no other origin can issue anything under
+  `/prod`.
+- A **provider** describes a kind of origin: what counts as proof, who is admitted, how IDs are
+  named. spiffex ships `keys`, `kubernetes`, `github`, `gitlab` and `oidc` as plain documents, and
+  you can write your own, including ones that hand the proof to a verifier program you install.
+- **Grants** let SPIFFE identities change the state through a management API, each on part of the
+  path tree. Nobody is an administrator by configuration, and no grant lets its holder become
+  someone with more.
+
+<!-- check: state -->
+```yaml
+origins:
+  prod:
+    provider: kubernetes
+  ci:
+    provider: github
+    with: { owner_id: "1234567", refs: [refs/heads/main] }
+```
+
+A new issuer starts with an empty state, which admits nobody.
 
 ## Try it
 
@@ -71,30 +95,31 @@ On the receiving side, verify with the same source (`jwtsvid.ParseAndValidate(to
 audiences)`), with the agent's `ValidateJWTSVID`, against the issuer's bundle endpoint, or with any
 OIDC library pointed at the issuer.
 
-A workload that already holds a token from an issuer spiffex trusts needs no key at all. From inside
-the `billing` pod of the [Kubernetes setup](docs/kubernetes.md), for example, a token to call
-`orders` with:
+A workload that already holds a token from an issuer spiffex trusts needs no key at all. In the
+[Kubernetes setup](docs/kubernetes.md), the agent container of the `billing` pod holds the pod's
+service account token, projected for the cluster origin's audience. Trading it for a token to call
+`orders` with is one RFC 8693 token exchange, here made with `spiffex token` in that container:
 
 ```bash
-curl https://issuer.example.org/token \
-  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
-  -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
-  --data-urlencode subject_token@/var/run/secrets/spiffex/token \
-  -d audience=spiffe://example.org/cluster/ns/shop/sa/orders
+kubectl -n shop exec deploy/billing -c spiffex-agent -- /spiffex token \
+  -issuer https://spiffex-issuer.spiffex.svc -ca-file /etc/spiffex/ca.crt \
+  -subject-token-file /var/run/secrets/spiffex/token \
+  -audience spiffe://example.org/cluster/ns/shop/sa/orders
 ```
 
-## Running it
+## Documentation
 
-- **[Configuration and operations](docs/configuration.md):** the issuer's settings, its state of
-  origins and where it is kept, registering workloads, the agent's flags, rotating signing keys.
+- **[Configuration and operations](docs/configuration.md):** the issuer's settings, where the state
+  is kept, workloads with keys, the agent's flags, rotating signing keys.
+- **[Providers](docs/providers.md):** the shipped providers and their parameters, writing your own,
+  verifier programs for proofs spiffex does not understand itself, and owner pinning for upstreams
+  that hand tokens to anyone.
 - **[Kubernetes](docs/kubernetes.md):** pods prove themselves with their service account tokens, so
   nothing is registered per workload; the agent runs as a native sidecar.
-- **[Managing the state](docs/management.md):** a management API on the issuer, for SPIFFE
-  identities holding grants, scoped by path and checked so that no grant lets its holder become
-  someone with more; `spiffex bootstrap` for the first grant and `spiffex manage` as a client.
-- **Proving identity:** with a private key per workload (`private_key_jwt`), by exchanging a
-  token from an issuer the spiffex issuer trusts (a Kubernetes cluster, GitHub Actions, a cloud
-  provider), or with any other proof a verifier program installed with the issuer can check.
+- **[Managing the state](docs/management.md):** grants, the management API, `spiffex bootstrap`
+  for the first grant and `spiffex manage` as a client.
+- **[Examples](examples):** a complete settings file and state for an issuer with several origins.
+- **[The specification](SPEC.md):** what any spiffex issuer and agent must do.
 
 ## Relation to the SPIFFE standards
 
@@ -104,6 +129,11 @@ curl https://issuer.example.org/token \
 | [JWT-SVID](https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md) | issued and validated |
 | [Trust bundles](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Trust_Domain_and_Bundle.md) | served as an `https_web` bundle endpoint |
 | [Workload API](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md) | the JWT-SVID profile only. Without X.509-SVIDs the agent is not a complete Workload API server; use your library's JWT source. |
+
+## Status
+
+Early development. The [specification](SPEC.md) is a draft at version 0, breaking changes are
+possible until version 1, and there is no release yet.
 
 ## Contributing and security
 

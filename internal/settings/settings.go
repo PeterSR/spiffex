@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,14 +92,20 @@ type BearerTokenFile struct {
 	Paths []string `yaml:"paths"`
 }
 
+// DefaultAllowPrivateHosts is the exemption the shipped kubernetes provider
+// needs: the in-cluster API server, which its Service serves on port 443.
+var DefaultAllowPrivateHosts = []string{"kubernetes.default.svc.cluster.local:443"}
+
 // Fetch governs the fetches the issuer makes for origins.
 type Fetch struct {
 	// RefusePrivateAddresses refuses to connect to loopback, link-local,
 	// private and other non-public addresses, checked on the address
-	// actually dialled.
-	RefusePrivateAddresses bool `yaml:"refuse_private_addresses"`
-	// AllowPrivateHosts are exempt from RefusePrivateAddresses.
-	AllowPrivateHosts []string `yaml:"allow_private_hosts"`
+	// actually dialled. On when left out.
+	RefusePrivateAddresses *bool `yaml:"refuse_private_addresses"`
+	// AllowPrivateHosts are the host:port pairs exempt from
+	// RefusePrivateAddresses; port 443 when left out. When the list is left
+	// out, DefaultAllowPrivateHosts.
+	AllowPrivateHosts *[]string `yaml:"allow_private_hosts"`
 }
 
 // VerifierLimits bound how many exec verifiers run (SPEC section 5.4). Zero
@@ -128,8 +135,9 @@ type Settings struct {
 	// the state in its storage.
 	Management             bool
 	RefusePrivateAddresses bool
-	AllowPrivateHosts      []string
-	VerifierLimits         VerifierLimits
+	// AllowPrivateHosts are host:port pairs, lower case.
+	AllowPrivateHosts []string
+	VerifierLimits    VerifierLimits
 	// VerifierUser is nil when verifiers run as the issuer's own user.
 	VerifierUser *User
 	// TrustedProxies are the peers whose X-Forwarded-For header names the
@@ -248,6 +256,24 @@ func (b BearerTokenFile) check() error {
 	return nil
 }
 
+// normalizeHostPort turns a host, or a host and port, into host:port, with
+// port 443 when none is given.
+func normalizeHostPort(h string) (string, error) {
+	host, port := h, "443"
+	if hp, p, err := net.SplitHostPort(h); err == nil {
+		host, port = hp, p
+	} else if strings.Count(h, ":") > 1 {
+		host = strings.Trim(h, "[]") // an IPv6 address without a port
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || port != strconv.Itoa(n) {
+		return "", fmt.Errorf("%q: the port is not a number from 1 to 65535", h)
+	}
+	if !validHost(host) || strings.ContainsAny(host, "/@?# ") {
+		return "", fmt.Errorf("%q is not a host, or a host and port", h)
+	}
+	return net.JoinHostPort(strings.ToLower(host), port), nil
+}
+
 func validHost(h string) bool {
 	return h != "" && !strings.ContainsAny(h, "/@?#: ") || net.ParseIP(strings.Trim(h, "[]")) != nil
 }
@@ -260,19 +286,26 @@ func Load(path string) (*Settings, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err := f.settings(filepath.Dir(path))
+	s, err := f.settings(filepath.Dir(path), false)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return s, nil
 }
 
-func (f *File) settings(baseDir string) (*Settings, error) {
+// Check checks every field the file sets as Load would, but does not
+// require keys_dir and state, which spiffex check does not need.
+func (f *File) Check() error {
+	_, err := f.settings("", true)
+	return err
+}
+
+func (f *File) settings(baseDir string, partial bool) (*Settings, error) {
 	v, err := f.Validation()
 	if err != nil {
 		return nil, err
 	}
-	if f.KeysDir == "" {
+	if f.KeysDir == "" && !partial {
 		return nil, errors.New("keys_dir is required")
 	}
 	s := &Settings{
@@ -281,14 +314,19 @@ func (f *File) settings(baseDir string) (*Settings, error) {
 		TokenTTL:               f.TokenTTL,
 		ActivationDelay:        f.ActivationDelay,
 		Management:             f.Management,
-		RefusePrivateAddresses: f.Fetch.RefusePrivateAddresses,
+		RefusePrivateAddresses: f.Fetch.RefusePrivateAddresses == nil || *f.Fetch.RefusePrivateAddresses,
 		VerifierLimits:         f.VerifierLimits,
 	}
-	for i, h := range f.Fetch.AllowPrivateHosts {
-		if !validHost(h) {
-			return nil, fmt.Errorf("fetch.allow_private_hosts[%d]: %q is not a host name or address", i, h)
+	allowed := DefaultAllowPrivateHosts
+	if f.Fetch.AllowPrivateHosts != nil {
+		allowed = *f.Fetch.AllowPrivateHosts
+	}
+	for i, h := range allowed {
+		hostPort, err := normalizeHostPort(h)
+		if err != nil {
+			return nil, fmt.Errorf("fetch.allow_private_hosts[%d]: %w", i, err)
 		}
-		s.AllowPrivateHosts = append(s.AllowPrivateHosts, h)
+		s.AllowPrivateHosts = append(s.AllowPrivateHosts, hostPort)
 	}
 	if u := f.VerifierUser; u != nil {
 		if u.UID == nil || u.GID == nil {
@@ -319,8 +357,10 @@ func (f *File) settings(baseDir string) (*Settings, error) {
 	if s.ActivationDelay < MinActivationDelay {
 		return nil, fmt.Errorf("activation_delay %s is too short (at least %s)", s.ActivationDelay, MinActivationDelay)
 	}
-	if s.State, err = f.stateLocation(baseDir); err != nil {
-		return nil, err
+	if f.State != nil || !partial {
+		if s.State, err = f.stateLocation(baseDir); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.VerifierLimits.fill(); err != nil {
 		return nil, fmt.Errorf("verifier_limits: %w", err)
