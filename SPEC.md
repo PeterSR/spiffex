@@ -227,18 +227,24 @@ do not.
 
 ### 3.3 Token exchange
 
-The workload presents a token from another issuer, an **upstream**: a Kubernetes service account
-token, a CI provider's OIDC token, a cloud identity token. See [RFC 8693].
+The workload presents a proof it already has as a subject token, as in [RFC 8693]. Usually this is
+a token from another issuer, an **upstream**: a Kubernetes service account token, a CI provider's
+OIDC token, a cloud identity token. For an `exec` origin it is whatever that origin's verifier
+understands (section 5.4).
 
 | Parameter | |
 |---|---|
 | `grant_type` | `urn:ietf:params:oauth:grant-type:token-exchange` |
-| `subject_token` | the upstream token, at most 16 KiB |
-| `subject_token_type` | `urn:ietf:params:oauth:token-type:jwt` or `urn:ietf:params:oauth:token-type:id_token`, processed identically; any other value is `invalid_request` |
+| `subject_token` | the proof, at most 16 KiB |
+| `subject_token_type` | `urn:ietf:params:oauth:token-type:jwt` or `urn:ietf:params:oauth:token-type:id_token`, processed identically, for `jwt` origins; `urn:spiffex:token-type:origin:<origin name>` for an `exec` origin; any other value is `invalid_request` |
 | `requested_token_type` | OPTIONAL; if present MUST be `urn:ietf:params:oauth:token-type:jwt` |
 
-No two `jwt` origins share both an upstream issuer and an audience (section 6.2), so the token
-names at most one origin. The issuer MUST:
+For an `exec` origin, the subject token type names the origin. If no `exec` origin has that name,
+the request is rejected as an invalid subject token; otherwise the issuer runs the origin's verifier
+(section 5.4), checks its admission (section 4.3) and issues the SPIFFE ID it names.
+
+For a JWT, no two `jwt` origins share both an upstream issuer and an audience (section 6.2), so the
+token names at most one origin. The issuer MUST:
 
 1. Reject a subject token whose `iss` is its own issuer URL.
 2. Read the token's `iss` and `aud` without trusting them, and find the one `jwt` origin whose
@@ -263,8 +269,11 @@ An origin has:
   (section 4.3) and an audience restriction (section 4.4);
 - for a `keys` proof, its **members** (section 4.2).
 
+An origin's **kind** is that of its provider's proof: `jwt`, `keys` or `exec`.
+
 Origin names, prefixes, and the upstream issuer and audience of `jwt` origins are not secret: the
-management API reveals them in conflicts (section 8.3).
+management API reveals them in conflicts (section 8.3). Providers are readable by every identity in
+the trust domain, so a provider, an `exec` verifier's command included, is not secret either.
 
 ### 4.1 Naming: prefix and name template
 
@@ -290,8 +299,8 @@ SPIFFE ID, and every identity's origin can be read from its path.
 A **name template** is empty, or a `/`-separated sequence of parts. Each part is either a literal
 segment, or a single placeholder `{...}` that fills one whole segment:
 
-- in a `jwt` origin, `{<claim path>}` is the value of a claim of the verified subject token
-  (section 4.3);
+- in a `jwt` or `exec` origin, `{<claim path>}` is the value of a claim of the verified subject
+  token, or of the claims the verifier returned (section 4.3);
 - in a `keys` origin, `{member}` is the member's name, and is the only placeholder.
 
 A placeholder's value MUST be a valid segment, or the request is rejected; it is never escaped or
@@ -310,13 +319,14 @@ which is how a workload's key is rotated.
 
 ### 4.3 Admission
 
-A **claim path** names a claim of the subject token. It is a `/`-separated list of JSON object
+A **claim path** names a claim of the subject token, or for an `exec` origin of the claims its
+verifier returned. It is a `/`-separated list of JSON object
 member names: `sub` is the top-level `sub` claim, and `kubernetes.io/namespace` is the `namespace`
 member of the `kubernetes.io` object. A claim whose own name contains `/` cannot be addressed. A
 claim's **value** is its string value, or an integer exactly as written in the token; any other JSON
 value counts as absent. Claim paths mean the same in `require`, `match`, `deny` and name templates.
 
-A `jwt` origin admits a verified token when:
+A `jwt` or `exec` origin admits a verified proof when:
 
 1. every claim path in `require` has a value;
 2. every entry of `match` holds;
@@ -351,8 +361,8 @@ rules for origin names. A provider has:
 | Field | |
 |---|---|
 | `params` | the parameters an origin fills in under `with`: each with a `type`, `string` or `list` (of strings), and either `required: true` or a `default` |
-| `proof` | exactly one of `jwt` (section 5.2) or `keys` (an empty object) |
-| `require`, `match`, `deny` | admission (section 4.3); `jwt` proofs only |
+| `proof` | exactly one of `jwt` (section 5.2), `keys` (an empty object) or `exec` (section 5.4) |
+| `require`, `match`, `deny` | admission (section 4.3); `jwt` and `exec` proofs only |
 | `name` | the default name template (section 4.1) |
 | `audiences` | OPTIONAL default audience restriction (section 4.4) |
 | `description` | OPTIONAL text for humans |
@@ -371,7 +381,7 @@ every override, and the issuer logs them at startup.
 An implementation SHOULD ship at least:
 
 - `keys`: a `keys` proof with name `{member}`;
-- `kubernetes`: section 5.4;
+- `kubernetes`: section 5.5;
 - `github` and `gitlab`: shared, with the owner as a required parameter;
 - `oidc`: a shared `jwt` proof using discovery, whose issuer and owner claims are parameters.
   Because it is shared, every origin using it must pin an owner with an exact `match` on one of
@@ -391,8 +401,8 @@ Substitution is one pass over the provider document, before anything else reads 
 Parameter names follow the rules for origin names. An origin that omits a required parameter, sets
 one the provider does not declare, or gives one of the wrong type MUST be refused.
 
-Only these fields may take a parameter: `issuer`, `audience`, `jwks_uri`, `owner_claims` and
-`audiences`, and the patterns of `match` and `deny`. All other fields, `shared` and `discovery` among them, are literal
+Only these fields may take a parameter: `issuer`, `audience`, `jwks_uri`, `owner_claims` (of a
+`jwt` proof) and `audiences`, and the patterns of `match` and `deny`. All other fields, `shared` and `discovery` among them, are literal
 in the provider.
 
 ### 5.2 The `jwt` proof
@@ -446,7 +456,9 @@ may include a local file's content.
 
 An upstream is **shared** when anyone can obtain a token from it carrying the configured audience: a
 public CI provider, a cloud provider's global issuer. Trusting a shared upstream means trusting
-strangers, unless admission pins the owner. Therefore:
+strangers, unless admission pins the owner. The same holds for an `exec` verifier that accepts
+proofs anyone can obtain, such as any signed request from any cloud account. Therefore, for `jwt`
+and `exec` proofs alike:
 
 - An implementation MUST know a list of well-known public issuers, each with the claims that name
   the token's owner. Issuers on the list are treated as shared whatever the document says. The list
@@ -474,7 +486,74 @@ These checks apply to the expanded origin (section 6.2), whatever its key source
 provider nor an origin can avoid them. A provider for a shared upstream SHOULD make the owner a
 required parameter.
 
-### 5.4 Example
+### 5.4 The `exec` proof
+
+The `exec` proof is the escape hatch for proofs spiffex does not understand itself: a signed cloud
+API request, a TPM quote, a token format of its own. A local program, the **verifier**, turns the
+proof into claims. Admission, naming, owner pinning, prefixes and grants then work as for a `jwt`
+origin. Unlike a JWT, though, only the verifier can tell whether a proof was made for this issuer,
+so binding the proof to its origin is the verifier's job (below).
+
+| Field | |
+|---|---|
+| `command` | the verifier's argument vector: an absolute path followed by fixed arguments. Literal, never a parameter |
+| `timeout` | OPTIONAL: how long the verifier may run; `5s` when absent, at most `30s`, in the format of `max_token_lifetime` |
+| `shared` | REQUIRED: whether anyone can obtain a proof the verifier accepts (section 5.3) |
+| `owner_claims` | as for `jwt` (section 5.2), literal |
+
+**Installing a verifier.** A verifier runs inside the issuer's trust boundary, so only the operator
+can install one. The issuer's own settings, outside the state, list the allowed verifiers as
+complete argument vectors, and a provider's `command` MUST equal one of them exactly, compared as
+strings, without resolving symbolic links. The list is empty by default. A state writer can choose
+among the verifiers the operator installed, never add one or change their arguments.
+
+**Running it.** For each request, the issuer:
+
+1. refuses the proof if it is not valid UTF-8 (`invalid_request`), or if it parses as a JWT whose
+   `iss` is the issuer URL, so the issuer's own tokens never pass through a verifier;
+2. runs the command directly, without a shell, with an empty environment, in a new process group,
+   and with no open file descriptors other than standard input, output and error. Running
+   verifiers as a separate, less privileged user is RECOMMENDED;
+3. writes one JSON object to its standard input and closes it:
+
+   ```json
+   {
+     "version": 1,
+     "issuer": "https://issuer.example.org",
+     "origin": "aws",
+     "audience": "https://issuer.example.org/origins/aws",
+     "subject_token": "<the proof, as sent>",
+     "params": { "account": "123456789012", "regions": ["eu-north-1"] }
+   }
+   ```
+
+   `audience` is the origin audience (section 5.2). `params` holds every parameter of the
+   provider, with the origin's values or the defaults, strings as strings and lists as arrays of
+   strings. Parameters reach the verifier only this way, as data;
+4. reads its standard output, and kills the whole process group when the timeout passes;
+5. accepts the proof only if the verifier exits with status 0 within the timeout, its standard
+   output is at most 64 KiB, and that output is exactly one JSON object with a `claims` member that
+   is a JSON object. Other members are ignored. A duplicated member name anywhere in the output is
+   a rejection. Claims follow section 4.3: they may nest objects, and an integer counts exactly as
+   the verifier wrote it.
+
+Any other outcome is a rejected subject token, answered like any other (section 3.1). The issuer
+MUST NOT pass the verifier's output or standard error to the client, and SHOULD log a bounded
+excerpt of the standard error.
+
+**What the verifier must check.** Besides the proof's own validity, a verifier MUST accept a proof
+only if the proof itself names the `audience` it was given, in whatever way its format allows (a
+signed header, a signed field, an audience claim). Without that, a proof made for another service,
+or for another origin using the same verifier, could be replayed here. A verifier is also
+responsible for refusing proofs that are stale or replayed, since only it understands them.
+
+**Limits.** The issuer MUST bound the number of verifiers running at once for each origin, and
+answer `server_error` when an origin's bound is reached, so one origin cannot starve another. It
+SHOULD limit the rate at which one client address can start verifiers.
+
+Validation never runs a verifier.
+
+### 5.5 Example
 
 The `kubernetes` provider, as an implementation might ship it:
 
@@ -550,7 +629,8 @@ origin is expanded with its provider and parameters, the following hold:
 - no two `jwt` origins have the same upstream issuer and the same audience;
 - name templates, patterns and members satisfy sections 4.1 to 4.4;
 - `jwt` proofs satisfy sections 5.2 and 5.3;
-- a `keys` origin has no `require`, `match` or `deny`, and a `jwt` origin has no `members`;
+- `exec` proofs satisfy section 5.4, and their `shared` and `owner_claims` section 5.3;
+- a `keys` origin has no `require`, `match` or `deny`, and only a `keys` origin has `members`;
 - grants satisfy section 8.2, including its closure rule.
 
 An issuer MUST refuse an invalid state as a whole: at startup it does not start, and while running
@@ -755,7 +835,11 @@ The agent's gRPC status codes:
 | The issuer is unreachable or failed, or no bundle has been fetched yet | `Unavailable` |
 | The agent cannot produce its own proof of identity (an unreadable key or subject token file) | `FailedPrecondition` |
 
-An agent supports both grants of section 3 and is configured to use one. It SHOULD reuse a JWT-SVID
+An agent supports both grants of section 3 and is configured to use one. For token exchange it
+obtains the subject token for each request either by reading a file, which platforms such as
+Kubernetes rotate in place, or by running a configured command without a shell and taking its
+standard output, for proofs that must be made fresh (a signed cloud API request, for one). It sends
+the subject token type its configuration names. It SHOULD reuse a JWT-SVID
 for the same audiences until half its lifetime has passed, and SHOULD refresh the bundle at the
 issuer's `spiffe_refresh_hint`.
 
@@ -789,6 +873,12 @@ through its agent, so the socket carries those permissions too.
   token from it with the configured audience. Section 5.3 forces an owner pin for shared
   upstreams; for any other upstream, whoever can obtain its tokens (for Kubernetes, whoever may
   create service account tokens) can take on the identities it maps to.
+- **Verifiers run inside the trust root.** An `exec` verifier runs with the issuer's privileges and
+  reads proofs that anyone can send. Only the operator can install one (section 5.4); treat it as
+  part of the issuer, keep it small, and make it refuse anything it does not fully understand.
+- **Verifiers own the audience binding.** For a JWT the issuer checks that the proof was made for
+  this origin; for an `exec` proof only the verifier can. A verifier that skips that check lets
+  proofs made for other services, or for laxer origins, be replayed (section 5.4).
 - **Origins make the issuer fetch URLs.** An identity allowed to create a `jwt` origin chooses a URL
   the issuer fetches keys from, which reaches whatever the issuer's network reaches. Section 5.2
   bounds those fetches and keeps the issuer's credentials from going there; restrict the issuer's
