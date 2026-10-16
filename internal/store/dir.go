@@ -47,6 +47,11 @@ func (d *Dir) Load(context.Context) (*Snapshot, error) {
 			}
 			continue
 		}
+		if errors.Is(err, fs.ErrNotExist) {
+			// The tree the link pointed at was swapped out and removed
+			// while it was being resolved.
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -61,7 +66,14 @@ func (d *Dir) Load(context.Context) (*Snapshot, error) {
 		}
 		return snap, nil
 	}
-	return nil, fmt.Errorf("%s kept changing while it was read", d.Path)
+	// Writes keep winning the race; a reader holding the shared lock sees
+	// no swap at all.
+	unlock, err := lockShared(d.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return d.loadLocked()
 }
 
 // loadLocked is Load for a writer that holds the lock already.
