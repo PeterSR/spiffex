@@ -1,10 +1,6 @@
 # spiffex
 
-**SPIFFE workload identity from a plain OAuth 2.0 issuer.**
-
-The name is SPIFFE plus *exchange*. A workload exchanges proof it already has for a SPIFFE identity.
-That proof is either a token its platform gave it, such as a Kubernetes service account token, or an
-assertion signed with its own key.
+**SPIFFE token exchange - workload identity from a plain OAuth 2.0 issuer.**
 
 Your services prove who they are to one issuer and get short-lived, audience-bound
 [JWT-SVIDs](https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md) back. Workloads keep
