@@ -403,3 +403,64 @@ func TestConfigValidation(t *testing.T) {
 		t.Fatalf("defaults: %v", err)
 	}
 }
+
+// The management API is served, and announced in discovery, only when the
+// issuer has one.
+func TestManagementEndpoint(t *testing.T) {
+	for _, path := range []string{"", "/customers/acme"} {
+		iss, srv := testIssuer(t, path, keyset.ES256)
+		var doc map[string]any
+		getJSON(t, srv, iss.URL()+DiscoveryPath, &doc)
+		if _, ok := doc["spiffex_management_endpoint"]; ok {
+			t.Errorf("discovery announces a management endpoint the issuer does not serve")
+		}
+		resp, err := srv.Client().Get(iss.URL() + "/manage/state")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET /manage/state without management: %s", resp.Status)
+		}
+
+		var served string
+		iss.cfg.Management = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { served = r.URL.Path })
+		srv.Config.Handler = iss.Handler()
+		getJSON(t, srv, iss.URL()+DiscoveryPath, &doc)
+		if doc["spiffex_management_endpoint"] != iss.URL()+"/manage" {
+			t.Errorf("spiffex_management_endpoint = %v", doc["spiffex_management_endpoint"])
+		}
+		resp, err = srv.Client().Get(iss.URL() + "/manage/state")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if served != path+"/manage/state" {
+			t.Errorf("the management handler served %q", served)
+		}
+	}
+}
+
+// A management path that is not clean is not found, never redirected to
+// the object its clean form names.
+func TestUncleanManagementPaths(t *testing.T) {
+	iss, srv := testIssuer(t, "", keyset.ES256)
+	var served []string
+	iss.cfg.Management = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { served = append(served, r.URL.Path) })
+	srv.Config.Handler = iss.Handler()
+	client := srv.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for _, p := range []string{"/manage/origins/web/members/..", "/manage/origins/web/members/%2e%2e", "/manage//state", "/manage/./state", "/x/../manage/state", "/manage/origins/a/../b"} {
+		resp, err := client.Get(iss.URL() + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s: %s, want 404", p, resp.Status)
+		}
+	}
+	if len(served) > 0 {
+		t.Errorf("the management handler served %v", served)
+	}
+}

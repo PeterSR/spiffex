@@ -98,3 +98,16 @@ func contentVersion(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
+
+// Encode writes a state document in the canonical form the stores write:
+// YAML, or indented JSON when asJSON is set.
+func Encode(st *state.State, asJSON bool) ([]byte, error) {
+	st, err := canonical(st)
+	if err != nil {
+		return nil, err
+	}
+	if asJSON {
+		return encodeJSON(st)
+	}
+	return encodeYAML(st)
+}

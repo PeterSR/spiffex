@@ -224,10 +224,8 @@ func TestFileEmptyAndInvalid(t *testing.T) {
 func TestWatchSettlesFiles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.yaml")
 	f := &File{Path: path}
-	var applied []string
-	w := watcher{store: f, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), settle: true, apply: func(s *Snapshot) {
-		applied = append(applied, s.Version)
-	}}
+	target := &recordingTarget{}
+	w := watcher{store: f, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), settle: true, target: target}
 	write := func(content string) {
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
@@ -236,17 +234,65 @@ func TestWatchSettlesFiles(t *testing.T) {
 	ctx := context.Background()
 	write("origins: {}\n")
 	w.check(ctx)
-	if len(applied) != 0 {
+	if len(target.applied) != 0 {
 		t.Fatal("a change was applied on first sight")
 	}
 	write("origins: { a: { provider: keys } }\n")
 	w.check(ctx)
 	w.check(ctx)
-	if len(applied) != 1 {
-		t.Fatalf("applied %d versions, want the one that held still", len(applied))
+	if len(target.applied) != 1 {
+		t.Fatalf("applied %d versions, want the one that held still", len(target.applied))
 	}
 	w.check(ctx)
-	if len(applied) != 1 {
+	if len(target.applied) != 1 {
 		t.Error("the same version was applied twice")
+	}
+}
+
+// recordingTarget records what it is given. Its generation can be moved on
+// while a load is in flight, as a write through the management API does.
+type recordingTarget struct {
+	generation uint64
+	applied    []string
+	// during, when set, runs between reading the generation and reloading.
+	during func()
+}
+
+func (r *recordingTarget) Generation() uint64 {
+	g := r.generation
+	if r.during != nil {
+		r.during()
+		r.during = nil
+	}
+	return g
+}
+
+func (r *recordingTarget) Reload(generation uint64, snap *Snapshot) bool {
+	if generation != r.generation {
+		return false
+	}
+	r.applied = append(r.applied, snap.Version)
+	r.generation++
+	return true
+}
+
+// A version read before something else was put in service is offered again
+// at the next check rather than forgotten.
+func TestWatchOffersAStaleReadAgain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	f := &File{Path: path}
+	if err := os.WriteFile(path, []byte(`{"origins": {}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := &recordingTarget{}
+	w := watcher{store: f, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), target: target}
+	target.during = func() { target.generation++ }
+	w.check(context.Background())
+	if len(target.applied) != 0 {
+		t.Fatal("a stale read was applied")
+	}
+	w.check(context.Background())
+	if len(target.applied) != 1 {
+		t.Errorf("the version was not offered again: %v", target.applied)
 	}
 }

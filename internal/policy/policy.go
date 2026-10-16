@@ -24,7 +24,26 @@ type View struct {
 	Version  string
 	origins  map[string]*Origin
 	expanded map[string]*state.Expanded
+	// document is the state as stored, shared: never change it.
+	document  *state.State
+	grants    []state.ParsedGrant
+	overrides []string
 }
+
+// Document returns the state document of this version. It is shared and
+// must not be changed.
+func (v *View) Document() *state.State { return v.document }
+
+// Expanded returns the origins, expanded. The map is shared and must not
+// be changed.
+func (v *View) Expanded() map[string]*state.Expanded { return v.expanded }
+
+// Grants returns the grants, parsed.
+func (v *View) Grants() []state.ParsedGrant { return v.grants }
+
+// Overrides names the providers in the state that take the place of
+// shipped ones.
+func (v *View) Overrides() []string { return v.overrides }
 
 // Origin is an expanded origin, and for a jwt origin where its keys come
 // from.
@@ -91,7 +110,8 @@ type Policy struct {
 	current atomic.Pointer[View]
 	// mu serialises Apply, so views are compiled one at a time and each
 	// builds on the one before.
-	mu sync.Mutex
+	mu         sync.Mutex
+	generation uint64
 }
 
 // New returns a Policy serving the empty state until the first Apply.
@@ -100,7 +120,7 @@ func New(opts Options) *Policy {
 		opts.Logger = slog.Default()
 	}
 	p := &Policy{opts: opts}
-	p.current.Store(&View{Version: store.Absent, origins: map[string]*Origin{}, expanded: map[string]*state.Expanded{}})
+	p.current.Store(&View{Version: store.Absent, origins: map[string]*Origin{}, expanded: map[string]*state.Expanded{}, document: &state.State{}})
 	return p
 }
 
@@ -113,6 +133,11 @@ func (p *Policy) Current() *View { return p.current.Load() }
 func (p *Policy) Apply(snap *store.Snapshot) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.apply(snap)
+}
+
+// apply is Apply for a caller that holds mu.
+func (p *Policy) apply(snap *store.Snapshot) error {
 	prev := p.current.Load()
 	if snap.Version == prev.Version && snap.Problem == nil && snap.Version != store.Absent {
 		return nil
@@ -129,19 +154,51 @@ func (p *Policy) Apply(snap *store.Snapshot) error {
 	if err := report.Err(); err != nil {
 		return err
 	}
-	view := p.compile(snap.Version, report, prev)
+	view := p.compile(snap.Version, snap.State, report, prev)
 	p.current.Store(view)
+	p.generation++
 	for _, name := range report.Overrides {
 		p.opts.Logger.Warn("a provider in the state overrides the shipped provider of that name", "provider", name)
 	}
 	return nil
 }
 
-// Reload is Apply for a state that changed while the issuer runs: it logs
-// the outcome, once for each version it is given.
-func (p *Policy) Reload(snap *store.Snapshot) {
-	before := p.Current().Version
-	if err := p.Apply(snap); err != nil {
+// Advance is Apply for a state written on top of version from: it puts
+// snap in service only while from is the version in service. When another
+// version was put in service meanwhile, one that may already build on snap,
+// it leaves that one and reports false; the next reload takes up whatever
+// is stored then.
+func (p *Policy) Advance(from string, snap *store.Snapshot) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.current.Load().Version != from {
+		return false, nil
+	}
+	return true, p.apply(snap)
+}
+
+// Generation counts the views put in service. A reload hands back the
+// generation it saw before reading the state, so that a state read before
+// a write was put in service cannot replace it.
+func (p *Policy) Generation() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.generation
+}
+
+// Reload is Apply for a state that changed while the issuer runs, read
+// when generation was in service. It logs the outcome. When another view
+// was put in service since, the snapshot may be older than that view, so it
+// is left alone and Reload reports false; it reports true when it took the
+// snapshot up or refused it as invalid.
+func (p *Policy) Reload(generation uint64, snap *store.Snapshot) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.generation != generation {
+		return false
+	}
+	before := p.current.Load().Version
+	if err := p.apply(snap); err != nil {
 		var problems state.Problems
 		lines := []string{err.Error()}
 		if errors.As(err, &problems) {
@@ -152,15 +209,17 @@ func (p *Policy) Reload(snap *store.Snapshot) {
 		}
 		p.opts.Logger.Error("the stored state is invalid; keeping the state in service",
 			"version", snap.Version, "in_service", before, "problems", strings.Join(lines, "; "))
-		return
+		return true
 	}
-	if v := p.Current(); v.Version != before {
+	if v := p.current.Load(); v.Version != before {
 		p.opts.Logger.Info("state reloaded", "version", v.Version, "origins", v.Len())
 	}
+	return true
 }
 
-func (p *Policy) compile(version string, report *state.Report, prev *View) *View {
-	v := &View{Version: version, origins: map[string]*Origin{}, expanded: report.Origins}
+func (p *Policy) compile(version string, doc *state.State, report *state.Report, prev *View) *View {
+	v := &View{Version: version, origins: map[string]*Origin{}, expanded: report.Origins,
+		document: doc, grants: report.Grants, overrides: report.Overrides}
 	for name, e := range report.Origins {
 		o := &Origin{Expanded: e}
 		if e.JWT != nil {

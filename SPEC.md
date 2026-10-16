@@ -623,7 +623,9 @@ grants:
 The document is the unit of change. An issuer MUST apply a new state as a whole or not at all, so
 it never acts on an origin whose provider or members are missing. How the document is stored (one
 file, a directory of files, a Kubernetes ConfigMap) is up to the implementation, provided every
-form converts to this one without loss. The document MUST NOT exceed 1 MiB, encoded as JSON.
+form converts to this one without loss. The document MUST NOT exceed 1 MiB, encoded as JSON, and
+MUST NOT hold more than 256 grants, or a grant more than 16 scopes, which keeps the closure check of
+section 8.2 cheap.
 
 Whoever can write the stored state directly controls every identity. That access is the way in for
 the first grant (section 8.4), and the way back when every granted identity is lost.
@@ -707,7 +709,10 @@ be addressed to the issuer URL (section 3.2), the token endpoint refuses its own
 tokens (section 3.3), and the audience is never combined with another (section 3).
 
 A missing or invalid token gets `401` with `WWW-Authenticate: Bearer`. The issuer SHOULD refuse a
-management token whose `jti` it has already seen on a write.
+management token whose `jti` it has already seen on a write that was authorized; recording `jti`s
+before authorization would let any workload fill the record. Processes that do not share the record
+let a token write once per process within its five minutes, and an implementation MUST say so in
+its documentation.
 
 ### 8.2 Grants and permissions
 

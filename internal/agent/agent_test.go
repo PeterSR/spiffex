@@ -56,7 +56,7 @@ origins:
   workloads:
     provider: keys
     prefix: /
-    audiences: [orders, payments]
+    audiences: [orders, payments, "` + issuerURL + `/manage"]
     members:
       billing: { keys: [` + string(pemKey) + `] }
 `))
@@ -520,5 +520,38 @@ func TestTokenRequestsAreSharedAndBounded(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Errorf("patient caller: %v", err)
+	}
+}
+
+// The issuer takes a management token for one write only, so the agent
+// fetches a new one for every caller instead of reusing it.
+func TestManagementTokensAreNotReused(t *testing.T) {
+	f := newFixture(t)
+	var total atomic.Int32
+	hook := func() func() {
+		total.Add(1)
+		return func() {}
+	}
+	f.onToken.Store(&hook)
+	ctx := f.ctx(t)
+	management := []string{f.srv.URL + "/manage"}
+	first, err := f.agent.token(ctx, management)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.agent.token(ctx, management)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Value == second.Value || total.Load() != 2 {
+		t.Errorf("two management tokens took %d requests and are the same: %v", total.Load(), first.Value == second.Value)
+	}
+	for range 2 {
+		if _, err := f.agent.token(ctx, []string{"orders"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := total.Load(); n != 3 {
+		t.Errorf("two tokens for orders made %d requests, want 1", n-2)
 	}
 }

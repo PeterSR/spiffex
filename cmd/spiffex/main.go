@@ -32,6 +32,9 @@ var commands = []command{
 	{"key", "generate and manage keys", runKey},
 	{"check", "validate a state document, a provider or an origin", runCheck},
 	{"provider", "list the shipped providers and print them", runProvider},
+	{"bootstrap", "write the first origin, member and grant to the stored state", runBootstrap},
+	{"state", "export, import and convert the stored state", runState},
+	{"manage", "read and change the state through the management API", runManage},
 	{"explain", "explain how the state treats a subject token", runExplain},
 	{"dev", "set up a local trust domain to try spiffex with", runDev},
 	{"version", "print the version", runVersion},
@@ -81,7 +84,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	for _, c := range commands {
-		fmt.Fprintf(w, "  %-8s %s\n", c.name, c.summary)
+		fmt.Fprintf(w, "  %-9s %s\n", c.name, c.summary)
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Run spiffex <command> -h for the flags of a command.")
@@ -135,6 +138,38 @@ func parseFlagsAndArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 		}
 		return nil, usageError{err}
 	}
+	return fs.Args(), fillFromEnvironment(fs)
+}
+
+// parseInterleaved is parseFlagsAndArgs for commands whose flags may also
+// follow their arguments, as in spiffex manage put origin web -f web.yaml.
+// Everything after -- is an argument.
+func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil, err
+			}
+			return nil, usageError{err}
+		}
+		rest := fs.Args()
+		if consumed := len(args) - len(rest); consumed > 0 && args[consumed-1] == "--" {
+			positional = append(positional, rest...)
+			break
+		}
+		if len(rest) == 0 {
+			break
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+	return positional, fillFromEnvironment(fs)
+}
+
+// fillFromEnvironment sets every flag not given on the command line from
+// its environment variable.
+func fillFromEnvironment(fs *flag.FlagSet) error {
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	var err error
@@ -149,7 +184,7 @@ func parseFlagsAndArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 			}
 		}
 	})
-	return fs.Args(), err
+	return err
 }
 
 func newLogger(level string) (*slog.Logger, error) {

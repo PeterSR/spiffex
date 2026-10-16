@@ -12,6 +12,7 @@ import (
 
 	"github.com/PeterSR/spiffex/internal/issuer"
 	"github.com/PeterSR/spiffex/internal/keyset"
+	"github.com/PeterSR/spiffex/internal/manage"
 	"github.com/PeterSR/spiffex/internal/policy"
 	"github.com/PeterSR/spiffex/internal/procgroup"
 	"github.com/PeterSR/spiffex/internal/settings"
@@ -99,8 +100,21 @@ func runIssuer(ctx context.Context, args []string) error {
 		}
 		go sweepOrphans(ctx, *reload)
 	}
+	var management http.Handler
+	if s.Management {
+		if management, err = manage.New(manage.Config{
+			Settings: s.Validation,
+			Store:    stateStore,
+			Keys:     keys,
+			Policy:   pol,
+			Logger:   logger,
+		}); err != nil {
+			return err
+		}
+	}
 	iss, err := issuer.New(issuer.Config{
 		URL:             s.Issuer(),
+		Management:      management,
 		TrustDomain:     s.TrustDomain(),
 		Keys:            keys,
 		Policy:          pol,
@@ -113,11 +127,7 @@ func runIssuer(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if s.Management {
-		logger.Warn("management is set, but this version does not serve the management API yet; the state changes only through its storage")
-	}
-
-	go store.Watch(ctx, stateStore, snap.Version, *reload, logger, pol.Reload)
+	go store.Watch(ctx, stateStore, snap.Version, *reload, logger, pol)
 	go func() { _ = keys.Run(ctx, *reload) }()
 
 	// The write timeout leaves room for a token request whose exec verifier
@@ -149,7 +159,8 @@ func runIssuer(ctx context.Context, args []string) error {
 		}
 	}
 	logger.Info("issuer listening", "address", l.Addr().String(), "tls", *tlsCert != "", "issuer", iss.URL(),
-		"trust_domain", iss.TrustDomain().Name(), "state", stateStore.String(), "state_version", snap.Version, "origins", pol.Current().Len())
+		"trust_domain", iss.TrustDomain().Name(), "state", stateStore.String(), "state_version", snap.Version, "origins", pol.Current().Len(),
+		"management", s.Management)
 	errc := make(chan error, 1)
 	go func() {
 		if srv.TLSConfig != nil {

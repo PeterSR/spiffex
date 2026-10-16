@@ -38,14 +38,26 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   limits, the user verifiers run as, and the proxies trusted to name clients. Unknown fields are
   refused.
 - The issuer rereads its signing keys and its TLS certificate while running.
-- Example Kubernetes manifests, with the state in a ConfigMap that is all the issuer may read, the agent as a native sidecar started behind a `spiffex health` probe, and an
-  end-to-end test on kind.
+- Example Kubernetes manifests, with the state in a ConfigMap that is all the issuer may read and
+  update, the agent as a native sidecar started behind a `spiffex health` probe, and an end-to-end
+  test on kind that covers the management API.
 - The state model: origins, providers and grants in one document, with the shipped `keys`,
   `kubernetes`, `github`, `gitlab` and `oidc` providers as plain provider documents, JSON Schemas
   for the state, a provider and an origin, and full offline validation, the grant closure rule
   included. `spiffex check` validates a state, a provider or an origin, `spiffex provider` lists
   and prints the shipped providers, and `spiffex explain` shows how the state would treat a subject
   token.
+- The management API, served with `management: true`: SPIFFE identities change origins, members,
+  providers and grants while the issuer runs, authenticated by a five-minute JWT-SVID for
+  `<issuer>/manage` that is refused once its member or origin is gone and makes one authorized change
+  per process. At most 256 grants per state and 16 scopes per grant keep the closure check quick.
+  Grants give `read`, `write` and `delegate` on path scopes, with no escalation and the closure rule
+  enforced; answers hide what the caller may not read; changes are compare-and-swap with ETags and
+  `If-Match`, validated as a whole, logged, and served by the storing process at once. The agent
+  fetches a fresh management token for every request instead of reusing one.
+- `spiffex bootstrap` writes the first origin, member and grant to the stored state;
+  `spiffex state` exports, imports and converts it; `spiffex manage` is a client for the management
+  API, with tokens from a Workload API socket or from the token endpoint.
 - A conformance matrix: tokens from stock go-spiffe, py-spiffe and plain OAuth 2.0 clients verify
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.

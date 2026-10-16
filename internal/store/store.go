@@ -99,14 +99,26 @@ func Open(loc settings.StateLocation) (Store, error) {
 	return nil, errors.New("no state location given")
 }
 
-// Watch loads the state every interval until ctx is done and calls apply
-// with each new version. A file or tree can be caught halfway through being
+// Target takes up the versions Watch reads. policy.Policy implements it.
+type Target interface {
+	// Generation identifies what the target has in service. Watch reads it
+	// before each load and hands it back with what it loaded.
+	Generation() uint64
+	// Reload takes up a snapshot read while generation was in service, and
+	// reports whether it did, or refused it for good. False means something
+	// else was put in service since, which the snapshot may predate; Watch
+	// then offers the stored state again at the next check.
+	Reload(generation uint64, snap *Snapshot) bool
+}
+
+// Watch loads the state every interval until ctx is done and hands each
+// new version to target. A file or tree can be caught halfway through being
 // edited by hand, so for those a version is passed on only once two loads in
 // a row have seen it. A ConfigMap changes as a whole and is passed on at
 // once. Load errors are logged when they first occur, not on every attempt.
 // since is the version already in service.
-func Watch(ctx context.Context, s Store, since string, interval time.Duration, logger *slog.Logger, apply func(*Snapshot)) {
-	w := watcher{store: s, logger: logger, applied: since, settle: settles(s), apply: apply}
+func Watch(ctx context.Context, s Store, since string, interval time.Duration, logger *slog.Logger, target Target) {
+	w := watcher{store: s, logger: logger, applied: since, settle: settles(s), target: target}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -123,7 +135,7 @@ type watcher struct {
 	store   Store
 	logger  *slog.Logger
 	settle  bool
-	apply   func(*Snapshot)
+	target  Target
 	applied string
 	seen    string
 	hasSeen bool
@@ -131,6 +143,7 @@ type watcher struct {
 }
 
 func (w *watcher) check(ctx context.Context) {
+	generation := w.target.Generation()
 	snap, err := w.store.Load(ctx)
 	if err != nil {
 		w.hasSeen = false
@@ -153,8 +166,9 @@ func (w *watcher) check(ctx context.Context) {
 		return
 	}
 	w.hasSeen = false
-	w.applied = snap.Version
-	w.apply(snap)
+	if w.target.Reload(generation, snap) {
+		w.applied = snap.Version
+	}
 }
 
 func settles(s Store) bool {

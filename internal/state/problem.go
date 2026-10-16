@@ -13,6 +13,21 @@ type Problem struct {
 	// origins.kube.with.namespaces. It is empty for the document as a whole.
 	Path    string
 	Message string
+	// Closure is set when the problem is a gap in grant closure (SPEC
+	// section 8.2), for callers that must say less than Message does to
+	// someone who may not read every grant involved.
+	Closure *ClosureGap
+}
+
+// ClosureGap is one way a set of grants fails to be closed: grant Writer
+// gives write on Scope, which reaches the who of grant Reached, but no single
+// grant whose who covers Writer's gives Perm on On, a scope of Reached.
+type ClosureGap struct {
+	Writer  string
+	Scope   string
+	Reached string
+	Perm    string
+	On      string
 }
 
 func (p Problem) String() string {

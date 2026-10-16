@@ -124,7 +124,8 @@ type Settings struct {
 	TokenTTL        time.Duration
 	ActivationDelay time.Duration
 	State           StateLocation
-	// Management is read, but the management API is not served yet.
+	// Management serves the management API (SPEC section 8), which changes
+	// the state in its storage.
 	Management             bool
 	RefusePrivateAddresses bool
 	AllowPrivateHosts      []string

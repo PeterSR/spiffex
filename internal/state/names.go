@@ -3,13 +3,13 @@ package state
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
 var (
 	nameRE      = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 	paramNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
-	segmentRE   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,255}$`)
 )
 
 // checkName checks the name of an origin, provider or grant.
@@ -20,9 +20,27 @@ func checkName(name string) error {
 	return nil
 }
 
-// validSegment reports whether s may be one segment of a SPIFFE ID path.
+// ValidName reports whether s may name an origin, provider or grant.
+func ValidName(s string) bool { return nameRE.MatchString(s) }
+
+// ValidSegment reports whether s may be one segment of a SPIFFE ID path,
+// such as a member's name.
+func ValidSegment(s string) bool { return validSegment(s) }
+
+// validSegment reports whether s may be one segment of a SPIFFE ID path. It
+// is called for every path that permissions are checked on, so it loops
+// over bytes rather than running a regular expression.
 func validSegment(s string) bool {
-	return s != "." && s != ".." && segmentRE.MatchString(s)
+	if len(s) == 0 || len(s) > 255 || s == "." || s == ".." {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '.' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func checkSegment(s string) error {
@@ -69,7 +87,16 @@ func within(path, scope string) bool {
 	return strings.HasPrefix(path, scope+"/")
 }
 
+// withinSegments is within for paths already split into valid segments.
+func withinSegments(path, scope []string) bool {
+	return len(path) >= len(scope) && slices.Equal(path[:len(scope)], scope)
+}
+
 // overlap reports whether two prefixes overlap (SPEC section 4.1).
 func overlap(a, b string) bool {
 	return within(a, b) || within(b, a)
 }
+
+// Overlap reports whether two prefixes overlap: one equals the other or
+// extends it by whole segments (SPEC section 4.1).
+func Overlap(a, b string) bool { return overlap(a, b) }

@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"log/slog"
@@ -94,14 +95,14 @@ func TestApplyKeepsServingTheLastValidState(t *testing.T) {
 	if err := p.Apply(snapshot(t, "v1", "origins: { kube: { provider: kubernetes } }\n")); err != nil {
 		t.Fatal(err)
 	}
-	p.Reload(snapshot(t, "v2", "origins: { a: { provider: keys, prefix: /x }, b: { provider: keys, prefix: /x/y } }\n"))
+	p.Reload(p.Generation(), snapshot(t, "v2", "origins: { a: { provider: keys, prefix: /x }, b: { provider: keys, prefix: /x/y } }\n"))
 	if v := p.Current(); v.Version != "v1" {
 		t.Errorf("serving %q after an invalid state, want v1", v.Version)
 	}
 	if !strings.Contains(log.String(), "overlaps") || !strings.Contains(log.String(), "in_service=v1") {
 		t.Errorf("log:\n%s", log)
 	}
-	p.Reload(&store.Snapshot{Version: "v3", Problem: io.ErrUnexpectedEOF})
+	p.Reload(p.Generation(), &store.Snapshot{Version: "v3", Problem: io.ErrUnexpectedEOF})
 	if v := p.Current(); v.Version != "v1" {
 		t.Errorf("serving %q after an unparsable state, want v1", v.Version)
 	}
@@ -151,7 +152,7 @@ func TestApplyRefusesADisappearedState(t *testing.T) {
 	if err := p.Apply(snapshot(t, "v1", "origins: { kube: { provider: kubernetes } }\n")); err != nil {
 		t.Fatal(err)
 	}
-	p.Reload(&store.Snapshot{Version: store.Absent, State: &state.State{}})
+	p.Reload(p.Generation(), &store.Snapshot{Version: store.Absent, State: &state.State{}})
 	if v := p.Current(); v.Version != "v1" || v.Len() != 1 {
 		t.Errorf("serving %q with %d origins after the state disappeared", v.Version, v.Len())
 	}
@@ -160,5 +161,58 @@ func TestApplyRefusesADisappearedState(t *testing.T) {
 	}
 	if err := p.Apply(&store.Snapshot{Version: "v2", State: &state.State{}}); err != nil || p.Current().Len() != 0 {
 		t.Errorf("an empty document: %v, %d origins", err, p.Current().Len())
+	}
+}
+
+// A write puts its state in service only over the version it built on, so
+// a newer version a reload put in service meanwhile is never replaced by an
+// older one.
+func TestAdvance(t *testing.T) {
+	p, _ := newPolicy(t)
+	if err := p.Apply(snapshot(t, "1", "origins: { a: { provider: keys } }")); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := p.Advance("1", snapshot(t, "2", "origins: { a: { provider: keys }, b: { provider: keys } }"))
+	if err != nil || !applied || p.Current().Version != "2" {
+		t.Fatalf("advance from 1: %v %v, serving %q", applied, err, p.Current().Version)
+	}
+	if err := p.Apply(snapshot(t, "3", "origins: { c: { provider: keys } }")); err != nil {
+		t.Fatal(err)
+	}
+	applied, err = p.Advance("2", snapshot(t, "2b", "origins: { d: { provider: keys } }"))
+	if err != nil || applied || p.Current().Version != "3" {
+		t.Errorf("advance from 2 while 3 serves: %v %v, serving %q", applied, err, p.Current().Version)
+	}
+}
+
+// A reload that read the state before a write was put in service cannot
+// put the older state back: write 1, a reload reads it, write 2 revokes a
+// member, and then the reload tries to apply what it read.
+func TestStaleReloadCannotUndoAWrite(t *testing.T) {
+	p, _ := newPolicy(t)
+	key, _ := json.Marshal(publicPEM(t))
+	withMember := `{"origins": {"vms": {"provider": "keys", "members": {"billing": {"keys": [` + string(key) + `]}}}}}`
+	if err := p.Apply(snapshot(t, "0", "origins: {}")); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := p.Advance("0", snapshot(t, "1", withMember)); !ok || err != nil {
+		t.Fatalf("write 1: %v %v", ok, err)
+	}
+	generation := p.Generation()
+	stale := snapshot(t, "1", withMember)
+	if ok, err := p.Advance("1", snapshot(t, "2", "origins: { vms: { provider: keys } }")); !ok || err != nil {
+		t.Fatalf("write 2: %v %v", ok, err)
+	}
+	if p.Reload(generation, stale) {
+		t.Error("the stale reload was taken up")
+	}
+	if v := p.Current(); v.Version != "2" {
+		t.Errorf("serving %q after the stale reload, want 2", v.Version)
+	}
+	if _, _, _, ok := p.Current().Member("vms/billing"); ok {
+		t.Error("the revoked member is back")
+	}
+	if !p.Reload(p.Generation(), snapshot(t, "2", "origins: { vms: { provider: keys } }")) {
+		t.Error("a current reload was refused")
 	}
 }

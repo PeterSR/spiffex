@@ -18,6 +18,7 @@
     },
     "grants": {
       "type": "object",
+      "maxProperties": 256,
       "propertyNames": { "$ref": "#/$defs/name" },
       "additionalProperties": { "$ref": "#/$defs/grant" }
     }
@@ -48,6 +49,7 @@
           "description": "Scopes: paths in the form of an origin prefix; / is everything.",
           "type": "array",
           "minItems": 1,
+          "maxItems": 16,
           "uniqueItems": true,
           "items": {
             "type": "string",

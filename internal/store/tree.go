@@ -346,3 +346,26 @@ func sortedNames[V any](m map[string]V) []string {
 	slices.Sort(names)
 	return names
 }
+
+// MemberKeys reads a member's public keys from a file: PEM PUBLIC KEY
+// blocks, as in a .pub file of the directory tree, or a JWK or a JWK Set,
+// as in a .jwk file. Each comes back as it goes in a member's keys.
+func MemberKeys(data []byte) ([]json.RawMessage, error) {
+	var keys []any
+	var err error
+	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '{' {
+		keys, err = jwkKeys(data)
+	} else {
+		keys, err = pemKeys(data)
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]json.RawMessage, len(keys))
+	for i, k := range keys {
+		if out[i], err = json.Marshal(k); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}

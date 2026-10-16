@@ -76,7 +76,10 @@ func (p IDPattern) MatchPath(path string) bool {
 	if len(p.segments) == 0 || checkPrefix(path) != nil {
 		return false
 	}
-	segs := splitPath(path)
+	return p.matchSegments(splitPath(path))
+}
+
+func (p IDPattern) matchSegments(segs []string) bool {
 	for i, pat := range p.segments {
 		if pat == "**" {
 			return len(segs) > i
@@ -91,10 +94,18 @@ func (p IDPattern) MatchPath(path string) bool {
 // Reaches reports whether some path within scope matches w (SPEC
 // section 8.2).
 func Reaches(scope string, w IDPattern) bool {
-	if len(w.segments) == 0 || checkPrefix(scope) != nil {
+	if checkPrefix(scope) != nil {
 		return false
 	}
-	s := splitPath(scope)
+	return reachesSegments(splitPath(scope), w)
+}
+
+// reachesSegments is Reaches for a scope already split into valid
+// segments.
+func reachesSegments(s []string, w IDPattern) bool {
+	if len(w.segments) == 0 {
+		return false
+	}
 	for i := 0; i < len(s) && i < len(w.segments); i++ {
 		switch w.segments[i] {
 		case "**":

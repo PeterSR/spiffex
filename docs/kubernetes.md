@@ -54,10 +54,32 @@ kubectl apply -f deploy/kubernetes/issuer.yaml
 
 The settings are in the ConfigMap `spiffex-issuer`, mounted as a file. The state is in the ConfigMap
 `spiffex-state`, under the key `state.yaml`, which the issuer reads through the Kubernetes API with
-its own service account; a Role lets it get that one ConfigMap and nothing else. Edit the
-state in place, with `kubectl -n spiffex edit configmap spiffex-state`: both replicas take up a valid
-change within the reload interval, 10 seconds by default, and keep the state they have when the new
-one is invalid, logging why. Applying the manifests again would put the example state back.
+its own service account; a Role lets it get and update that one ConfigMap and nothing else. It needs
+`update` only for the management API, which the example settings turn on; with `management: false`,
+drop the verb. Change the state through the management API, or in place with
+`kubectl -n spiffex edit configmap spiffex-state`: both replicas take up a valid change within the
+reload interval, 10 seconds by default, and keep the state they have when the new one is invalid,
+logging why. Applying the manifests again would put the example state back.
+
+The first grant has to be written to the ConfigMap directly. The issuer's own pods can, so run
+`spiffex bootstrap` in one of them, here for a service account's identity:
+
+```bash
+kubectl -n spiffex exec deploy/spiffex-issuer -- /spiffex bootstrap -config /config/issuer.yaml \
+  -grant platform -who spiffe://example.org/cluster/ns/platform/sa/admin
+```
+
+or for an operator's key, passed on standard input:
+
+```bash
+kubectl -n spiffex exec -i deploy/spiffex-issuer -- /spiffex bootstrap -config /config/issuer.yaml \
+  -member alice -key - < alice.pub
+```
+
+A pod with that service account then manages the state through its agent, with `spiffex manage
+-issuer https://spiffex-issuer.spiffex.svc get state`; see [management.md](management.md). Keep in
+mind that whoever may create tokens for that service account, or pods running as it, holds the
+grant too.
 
 The certificate must be valid for `spiffex-issuer.spiffex.svc`; cert-manager can issue and renew it,
 and the issuer picks up renewals without a restart. The issuer reads the cluster's keys with its own
@@ -72,6 +94,8 @@ so an origin cannot make the issuer reach other services inside the cluster.
 Both replicas sign with the keys in the Secret. Each keeps its own record of used client assertions,
 so with N replicas an intercepted assertion could be replayed up to N times within its lifetime of
 at most five minutes; service account token exchange is not affected, as it uses no assertions.
+The same holds for management tokens: each replica remembers the ones it took a change from, so an
+intercepted management token could make one change on each replica within its five minutes.
 
 ## A workload
 
@@ -107,4 +131,7 @@ and three workloads from these manifests, and checks that two of them can authen
 while the third, whose token carries the wrong audience, gets nothing. It also mints tokens by hand
 with `kubectl create token` and checks that the issuer refuses those not bound to a pod, and those
 bound to a pod but meant to live longer than the cap, and that changes to the state ConfigMap are
-taken up while an invalid state is not. It needs docker, kind, kubectl, openssl and Go.
+taken up while an invalid state is not. Last, it bootstraps a grant for one pod, which then adds an
+origin and a member through the management API with its agent, and checks that a pod without a
+grant is refused and a grant that would break closure is refused with its reasons. It needs docker,
+kind, kubectl, openssl and Go, and removes the cluster and the images it built when it is done.

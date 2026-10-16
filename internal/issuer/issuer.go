@@ -37,6 +37,7 @@ const (
 	BundlePath        = "/bundle"
 	TokenPath         = "/token"
 	HealthPath        = "/healthz"
+	ManagementPath    = "/manage"
 )
 
 // Defaults for Config fields left zero.
@@ -69,6 +70,10 @@ type Config struct {
 	// Verifiers runs the verifiers of exec origins. Nil means a runner with
 	// the default limits.
 	Verifiers *verifier.Runner
+	// Management serves the management API under <issuer>/manage (SPEC
+	// section 8). Nil leaves it disabled: /manage is not found and discovery
+	// does not announce it.
+	Management http.Handler
 	// TrustedProxies are the peers whose X-Forwarded-For header says which
 	// client a request came from, for limiting how often a client may start
 	// verifiers.
@@ -212,7 +217,22 @@ func (iss *Issuer) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	return mux
+	if iss.cfg.Management == nil {
+		return mux
+	}
+	managed := iss.basePath + ManagementPath + "/"
+	mux.Handle(managed, iss.cfg.Management)
+	// The mux would redirect a path that is not clean to its clean form,
+	// so that .. as a member name could lead a client to another object.
+	// Under the management API such a path is simply not found.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clean := path.Clean(r.URL.Path)
+		if r.URL.Path != clean && (strings.HasPrefix(r.URL.Path, managed) || strings.HasPrefix(clean+"/", managed)) {
+			http.NotFound(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func (iss *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
@@ -232,6 +252,9 @@ func (iss *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"claims_supported":                                 []string{"iss", "sub", "aud", "exp", "iat", "jti"},
 		"spiffe_bundle_endpoint":                           iss.cfg.URL + BundlePath,
 		"spiffe_trust_domain":                              iss.cfg.TrustDomain.Name(),
+	}
+	if iss.cfg.Management != nil {
+		doc["spiffex_management_endpoint"] = iss.ManagementEndpoint()
 	}
 	writeJSON(w, http.StatusOK, doc, iss.publicCache())
 }

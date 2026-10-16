@@ -30,6 +30,9 @@ data:
     keys_dir: /keys
     state:
       configmap: { namespace: spiffex, name: spiffex-state }
+    # Serve the management API at https://spiffex-issuer.spiffex.svc/manage.
+    # Nobody can use it until spiffex bootstrap has written a first grant.
+    management: true
     # Keys are fetched only from public addresses, but for the cluster's own
     # API server, which the kubernetes provider reads them from.
     fetch:
@@ -38,8 +41,9 @@ data:
 ---
 # The issuer's state: who gets which identity. The issuer reads it through
 # the Kubernetes API and takes up changes while it runs. Apply it once; after
-# that, change it in place (kubectl edit), so that applying these manifests
-# again does not undo the changes.
+# that, change it through the management API (spiffex manage) or in place
+# (kubectl edit), so that applying these manifests again does not undo the
+# changes.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -68,11 +72,13 @@ metadata:
   name: spiffex-issuer
   namespace: spiffex
 rules:
-  # Reading the state, and nothing else in the cluster.
+  # Reading the state, and nothing else in the cluster. Writing it (update)
+  # is needed only for the management API and spiffex bootstrap; drop it
+  # when management is off.
   - apiGroups: [""]
     resources: [configmaps]
     resourceNames: [spiffex-state]
-    verbs: [get]
+    verbs: [get, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

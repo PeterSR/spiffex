@@ -29,6 +29,8 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
+
+	"github.com/PeterSR/spiffex/internal/state"
 )
 
 const (
@@ -321,8 +323,12 @@ type tokenCall struct {
 // token returns a cached token for the audiences while it has more than half
 // its lifetime left, and fetches a new one otherwise. Concurrent callers
 // asking for the same audiences share one request, and each waits only as
-// long as its own context allows.
+// long as its own context allows. Tokens for the management endpoint are
+// the exception: each caller gets a fresh one.
 func (a *Agent) token(ctx context.Context, audiences []string) (Token, error) {
+	if len(audiences) == 1 && audiences[0] == state.ManagementAudience(a.issuer.URL()) {
+		return a.singleUseToken(ctx, audiences)
+	}
 	key := strings.Join(audiences, "\x00")
 	call, err := a.joinOrStart(ctx, key, audiences, false)
 	if err != nil {
@@ -382,6 +388,43 @@ func (a *Agent) freshToken(key string) (Token, bool) {
 	return t, ok && time.Now().Before(t.Expires.Add(-t.Lifetime/2))
 }
 
+// singleUseToken fetches a token for the management endpoint, which is
+// neither cached nor shared: the issuer accepts a management token for one
+// write only (SPEC section 8.1), so each caller needs its own.
+func (a *Agent) singleUseToken(ctx context.Context, audiences []string) (Token, error) {
+	select {
+	case a.fetchSlots <- struct{}{}:
+	case <-ctx.Done():
+		return Token{}, status.FromContextError(ctx.Err()).Err()
+	}
+	defer func() { <-a.fetchSlots }()
+	t, err := a.issuer.FetchToken(ctx, a.cred, audiences)
+	if err != nil {
+		return Token{}, a.fetchError(err, audiences)
+	}
+	a.tokenMu.Lock()
+	a.id = t.SPIFFEID
+	a.tokenMu.Unlock()
+	return t, nil
+}
+
+// fetchError logs why a token request failed and turns the failure into
+// the Workload API's status (SPEC section 9).
+func (a *Agent) fetchError(err error, audiences []string) error {
+	var rejected *RejectedError
+	var local *CredentialError
+	switch {
+	case errors.As(err, &rejected):
+		a.logger.Warn("the issuer refused a token request", "audience", audiences, "error", err)
+		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.As(err, &local):
+		a.logger.Error("the workload credential failed", "error", err)
+		return status.Error(codes.FailedPrecondition, err.Error())
+	}
+	a.logger.Warn("fetching a token failed", "audience", audiences, "error", err)
+	return status.Error(codes.Unavailable, "the issuer is unavailable")
+}
+
 // fetchToken runs one token request on behalf of everyone waiting on call.
 // It does not use any caller's context: a caller giving up must not fail the
 // request for the others.
@@ -389,19 +432,7 @@ func (a *Agent) fetchToken(key string, audiences []string, call *tokenCall) {
 	defer func() { <-a.fetchSlots }()
 	t, err := a.issuer.FetchToken(context.Background(), a.cred, audiences)
 	if err != nil {
-		var rejected *RejectedError
-		var local *CredentialError
-		switch {
-		case errors.As(err, &rejected):
-			a.logger.Warn("the issuer refused a token request", "audience", audiences, "error", err)
-			call.err = status.Error(codes.PermissionDenied, err.Error())
-		case errors.As(err, &local):
-			a.logger.Error("the workload credential failed", "error", err)
-			call.err = status.Error(codes.FailedPrecondition, err.Error())
-		default:
-			a.logger.Warn("fetching a token failed", "audience", audiences, "error", err)
-			call.err = status.Error(codes.Unavailable, "the issuer is unavailable")
-		}
+		call.err = a.fetchError(err, audiences)
 	}
 	call.token = t
 

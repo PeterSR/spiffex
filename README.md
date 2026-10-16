@@ -89,6 +89,9 @@ curl https://issuer.example.org/token \
   origins and where it is kept, registering workloads, the agent's flags, rotating signing keys.
 - **[Kubernetes](docs/kubernetes.md):** pods prove themselves with their service account tokens, so
   nothing is registered per workload; the agent runs as a native sidecar.
+- **[Managing the state](docs/management.md):** a management API on the issuer, for SPIFFE
+  identities holding grants, scoped by path and checked so that no grant lets its holder become
+  someone with more; `spiffex bootstrap` for the first grant and `spiffex manage` as a client.
 - **Proving identity:** with a private key per workload (`private_key_jwt`), by exchanging a
   token from an issuer the spiffex issuer trusts (a Kubernetes cluster, GitHub Actions, a cloud
   provider), or with any other proof a verifier program installed with the issuer can check.

@@ -3,6 +3,8 @@ package state
 import (
 	"strings"
 	"testing"
+
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
 func TestClosure(t *testing.T) {
@@ -193,4 +195,49 @@ grants:
   ops-read: { who: "spiffe://example.org/vms/ops", can: [read], on: [/] }
   writer: { who: "spiffe://example.org/ci/w", can: [write], on: [/x] }
 `), "grants.ops", "write on /x")
+}
+
+// A closure problem says which grants and which permission are involved,
+// for callers that must tell less than its message does.
+func TestClosureGap(t *testing.T) {
+	r := check(t, `
+grants:
+  ops: { who: "spiffe://example.org/vms/ops", can: [write], on: [/ci] }
+  admin: { who: "spiffe://example.org/ci/admin", can: [delegate], on: [/] }
+`)
+	if len(r.Problems) != 1 || r.Problems[0].Closure == nil {
+		t.Fatalf("problems %v", r.Problems)
+	}
+	want := ClosureGap{Writer: "ops", Scope: "/ci", Reached: "admin", Perm: "delegate", On: "/"}
+	if *r.Problems[0].Closure != want {
+		t.Errorf("gap %+v, want %+v", *r.Problems[0].Closure, want)
+	}
+}
+
+func TestHolds(t *testing.T) {
+	r := check(t, `
+grants:
+  ops: { who: "spiffe://example.org/vms/*", can: [write], on: [/ci, /cd] }
+  reader: { who: "spiffe://example.org/vms/auditor", can: [read], on: [/] }
+`)
+	wantValid(t, r)
+	ops, auditor := spiffeid.RequireFromPath(td, "/vms/ops"), spiffeid.RequireFromPath(td, "/vms/auditor")
+	tests := []struct {
+		id         spiffeid.ID
+		perm, path string
+		want       bool
+	}{
+		{ops, PermWrite, "/ci/x", true},
+		{ops, PermRead, "/cd", true},
+		{ops, PermWrite, "/c", false},
+		{ops, PermDelegate, "/ci", false},
+		{auditor, PermRead, "/anything", true},
+		{auditor, PermWrite, "/ci", true},
+		{spiffeid.RequireFromPath(td, "/vms/ops/x"), PermRead, "/ci", false},
+	}
+	for _, tc := range tests {
+		if got := Holds(r.Grants, tc.id, tc.perm, tc.path); got != tc.want {
+			t.Errorf("%s holds %s on %s: %v, want %v", tc.id, tc.perm, tc.path, got, tc.want)
+		}
+	}
 }

@@ -110,7 +110,7 @@ type validator struct {
 	// objects to each other are then skipped.
 	partial  bool
 	problems Problems
-	seen     map[Problem]bool
+	seen     map[string]bool
 	// calls counts every problem raised, repeats included, so a caller can
 	// tell whether its own step failed even when the problem was already
 	// reported for another origin using the same provider.
@@ -118,16 +118,19 @@ type validator struct {
 }
 
 func newValidator(st *State, s Settings, partial bool) *validator {
-	return &validator{settings: s, state: st, partial: partial, seen: map[Problem]bool{}}
+	return &validator{settings: s, state: st, partial: partial, seen: map[string]bool{}}
 }
 
 func (v *validator) add(path, format string, args ...any) {
+	v.addProblem(Problem{Path: path, Message: fmt.Sprintf(format, args...)})
+}
+
+func (v *validator) addProblem(p Problem) {
 	v.calls++
-	p := Problem{Path: path, Message: fmt.Sprintf(format, args...)}
-	if v.seen[p] {
+	if v.seen[p.String()] {
 		return
 	}
-	v.seen[p] = true
+	v.seen[p.String()] = true
 	v.problems = append(v.problems, p)
 }
 
@@ -304,4 +307,15 @@ func mayBeShared(p *Provider) bool {
 		return j.Shared || isRef || wellKnown
 	}
 	return false
+}
+
+// Shipped returns the provider of that name that ships with spiffex. It is
+// shared and must not be changed.
+func Shipped(name string) (*Provider, bool) {
+	shipped, err := shippedProviders()
+	if err != nil {
+		return nil, false
+	}
+	p, ok := shipped[name]
+	return p, ok
 }

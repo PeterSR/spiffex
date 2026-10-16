@@ -18,7 +18,7 @@ state:                                 # where the state lives: exactly one of
   # dir: /etc/spiffex/state            #   a directory tree, one file per object
   # configmap: { namespace: spiffex, name: spiffex-state }   # a Kubernetes ConfigMap
 
-management: false                      # read, but the management API is not served yet
+management: false                      # serve the management API at <issuer>/manage (docs/management.md)
 
 # What the state may make the issuer do with files on its machine (SPEC section 5.2). Lists
 # left out keep their defaults, which allow exactly what the shipped kubernetes provider needs.
@@ -85,6 +85,12 @@ empty, too. The issuer checks the state every `-reload-interval` (10 seconds by 
 
 `spiffex check -settings issuer.yaml state.yaml` runs the same validation as the issuer, without
 one; `spiffex explain` shows how the state would treat a given subject token.
+
+With `management: true`, SPIFFE identities holding grants change the state through the management
+API, and the issuer stores what they change, so it needs write access to the state. The issuer that
+stores a change serves it at once; others take it up at their next check. `spiffex bootstrap`
+writes the first grant, and `spiffex state` exports, imports and converts the stored state directly.
+See [management.md](management.md).
 
 In a **directory**, each object is a file of its own:
 

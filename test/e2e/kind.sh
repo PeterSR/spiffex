@@ -5,7 +5,9 @@
 # deploy/kubernetes/workload.yaml, get JWT-SVIDs and verify each other's. A
 # third workload whose token carries the wrong audience must get nothing.
 # Changes to the state are taken up while the issuer runs; an invalid state
-# is not.
+# is not. Finally the management API: a grant bootstrapped for one pod lets
+# it add an origin through its agent, a pod without one is refused, and a
+# grant that would break closure is refused with its reasons.
 #
 # Needs docker, kind, kubectl, openssl and Go. KEEP=1 leaves the cluster up
 # after the run, for a look around.
@@ -19,7 +21,10 @@ ORIGIN_AUD=$ISSUER/origins/cluster
 
 cleanup() {
   rm -rf "$WORK"
-  if [ -z "${KEEP:-}" ]; then kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true; fi
+  if [ -z "${KEEP:-}" ]; then
+    kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+    docker image rm spiffex:e2e spiffex-e2e-client:e2e >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -163,4 +168,59 @@ echo "ok: the invalid state is logged"
 set_state "$STATE"
 until_exchange ok || { echo "FAIL: restoring the state did not take effect"; exit 1; }
 echo "ok: restoring the state is taken up"
+
+echo "== management"
+# The first grant is written straight to the state, here from inside an
+# issuer pod, whose service account may update the state ConfigMap.
+kubectl -n spiffex exec deploy/spiffex-issuer -- /spiffex bootstrap -config /config/issuer.yaml \
+  -grant shop-admin -who "$BILLING" >/dev/null
+echo "ok: bootstrapped a grant for $BILLING"
+manage() { # workload, then spiffex manage arguments; the token comes from the pod's agent
+  local w=$1; shift
+  kubectl -n shop exec -i deploy/"$w" -c app -- sh -c \
+    'cat > /tmp/ca.crt && issuer=$1 && shift && /spiffex manage -issuer "$issuer" -ca-file /tmp/ca.crt "$@"' - \
+    "$ISSUER" "$@" <"$WORK/ca.crt" 2>&1
+}
+in_pod() { kubectl -n shop exec deploy/"$1" -c app -- sh -c "$2"; }
+in_pod billing 'echo "{\"provider\": \"keys\"}" > /tmp/vms.json'
+out=$(manage billing put origin vms -f /tmp/vms.json) || { echo "FAIL: billing could not add an origin: $out"; exit 1; }
+case $out in
+  "created origin vms, version"*) echo "ok: billing adds an origin through its agent" ;;
+  *) echo "FAIL: adding an origin answered: $out"; exit 1 ;;
+esac
+in_pod billing '/spiffex key generate -out /tmp/m1.key > /tmp/m1.pub'
+out=$(manage billing put member vms m1 -key /tmp/m1.pub) || { echo "FAIL: billing could not add a member: $out"; exit 1; }
+# Both replicas must issue to the new member: the one that stored it at
+# once, the other at its next reload.
+member_token() {
+  kubectl -n shop exec -i deploy/billing -c app -- sh -c \
+    'cat > /tmp/ca.crt && /spiffex token -issuer "$1" -client-id vms/m1 -key-file /tmp/m1.key -audience x -ca-file /tmp/ca.crt' - \
+    "$ISSUER" <"$WORK/ca.crt" >/dev/null 2>&1
+}
+streak=0
+for _ in $(seq 60); do
+  if member_token; then streak=$((streak + 1)); else streak=0; fi
+  [ "$streak" -ge 6 ] && break
+  sleep 1
+done
+[ "$streak" -ge 6 ] || { echo "FAIL: the member added through the API gets no token"; exit 1; }
+echo "ok: the issuer takes up the change"
+out=$(manage orders get state) || { echo "FAIL: orders could not read the state: $out"; exit 1; }
+case $out in
+  *vms*) echo "FAIL: orders sees an origin it has no grant for: $out"; exit 1 ;;
+  *) echo "ok: orders sees nothing it has no grant for" ;;
+esac
+in_pod orders 'echo "{\"provider\": \"keys\"}" > /tmp/other.json'
+out=$(manage orders put origin other -f /tmp/other.json) && { echo "FAIL: orders, without a grant, added an origin"; exit 1; }
+case $out in
+  *"403 Forbidden"*) echo "ok: a pod without a grant is refused" ;;
+  *) echo "FAIL: orders was refused for another reason: $out"; exit 1 ;;
+esac
+# Anyone who may write /cluster could become billing, which may do more.
+in_pod billing "echo '{\"who\": \"spiffe://$TD/cluster/**\", \"can\": [\"write\"], \"on\": [\"/cluster\"]}' > /tmp/grant.json"
+out=$(manage billing put grant cluster-writers -f /tmp/grant.json) && { echo "FAIL: a grant breaking closure was stored"; exit 1; }
+case $out in
+  *"422 Unprocessable Entity"*"grants.cluster-writers"*"grant shop-admin"*) echo "ok: a grant breaking closure gets a 422 naming the grants" ;;
+  *) echo "FAIL: the closure-breaking grant was refused for another reason: $out"; exit 1 ;;
+esac
 echo "== all checks passed"
