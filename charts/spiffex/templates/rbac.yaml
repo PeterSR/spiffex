@@ -1,0 +1,30 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "spiffex.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spiffex.labels" . | nindent 4 }}
+rules:
+  # Reading the state, and nothing else in the cluster. Writing it is needed only for the
+  # management API and spiffex bootstrap.
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ include "spiffex.stateConfigMap" . | quote }}]
+    verbs: [{{ if .Values.management }}get, update{{ else }}get{{ end }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "spiffex.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spiffex.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "spiffex.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "spiffex.fullname" . }}
+    namespace: {{ .Release.Namespace }}

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# The single-quoted sh -c scripts below expand their own arguments, in the pod.
+# shellcheck disable=SC2016
 # End-to-end test on a kind cluster: the issuer runs in the cluster, keeps
 # its state in a ConfigMap, trusts the cluster's service account tokens, and
 # two workloads with agent sidecars, deployed from
@@ -9,11 +11,22 @@
 # it add an origin through its agent, a pod without one is refused, and a
 # grant that would break closure is refused with its reasons.
 #
-# Needs docker, kind, kubectl, openssl and Go. KEEP=1 leaves the cluster up
-# after the run, for a look around.
+# INSTALL=helm (or test/e2e/kind-helm.sh) installs the issuer with the chart in
+# charts/spiffex instead of deploy/kubernetes/issuer.yaml, runs the same
+# checks, and then checks that upgrading, rolling back to the install
+# revision, uninstalling and reinstalling the chart leave the state the
+# management API wrote alone.
+#
+# Needs docker, kind, kubectl, openssl and Go, and helm with INSTALL=helm.
+# KEEP=1 leaves the cluster up after the run, for a look around.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-CLUSTER=spiffex-e2e
+INSTALL=${INSTALL:-manifests}
+case $INSTALL in
+  manifests) CLUSTER=spiffex-e2e STATE_CM=spiffex-state ;;
+  helm) CLUSTER=spiffex-e2e-helm STATE_CM=spiffex-issuer-state ;;
+  *) echo "INSTALL is manifests or helm, not $INSTALL" >&2; exit 2 ;;
+esac
 WORK="$(mktemp -d)"
 TD=example.org
 ISSUER=https://spiffex-issuer.spiffex.svc
@@ -55,8 +68,29 @@ mkdir "$WORK/keys" && "$WORK/spiffex" key add -dir "$WORK/keys" >/dev/null
 kubectl create namespace spiffex --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n spiffex create secret generic spiffex-signing-keys --from-file="$WORK/keys" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n spiffex create secret tls spiffex-issuer-tls --cert="$WORK/tls.crt" --key="$WORK/tls.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-sed -e "s#ghcr.io/petersr/spiffex:latest#spiffex:e2e#" \
-    -e "s#issuer: https://kubernetes.default.svc.cluster.local\$#issuer: $K8S_ISSUER#" deploy/kubernetes/issuer.yaml | kubectl apply -f - >/dev/null
+if [ "$INSTALL" = helm ]; then
+  cat >"$WORK/values.yaml" <<VALUES
+trustDomain: $TD
+image: { repository: spiffex, tag: e2e }
+signingKeys: { existingSecret: spiffex-signing-keys }
+tls: { existingSecret: spiffex-issuer-tls }
+state:
+  content:
+    origins:
+      cluster:
+        provider: kubernetes
+        with:
+          issuer: $K8S_ISSUER
+          namespaces: [shop]
+VALUES
+  helm_issuer() { # install or upgrade, then extra helm flags
+    helm "$1" spiffex-issuer charts/spiffex -n spiffex -f "$WORK/values.yaml" "${@:2}" >/dev/null
+  }
+  helm_issuer install
+else
+  sed -e "s#ghcr.io/petersr/spiffex:v[^ ]*\$#spiffex:e2e#" \
+      -e "s#issuer: https://kubernetes.default.svc.cluster.local\$#issuer: $K8S_ISSUER#" deploy/kubernetes/issuer.yaml | kubectl apply -f - >/dev/null
+fi
 kubectl -n spiffex rollout status deploy/spiffex-issuer --timeout=120s
 
 echo "== workloads"
@@ -65,7 +99,7 @@ kubectl -n shop create configmap spiffex-ca --from-file=ca.crt="$WORK/ca.crt" --
 workload() { # name audience
   sed -e "s#billing#$1#g" \
       -e "s#audience: $ORIGIN_AUD#audience: $2#" \
-      -e "s#ghcr.io/petersr/spiffex:latest#spiffex:e2e#" \
+      -e "s#ghcr.io/petersr/spiffex:v[^ ]*\$#spiffex:e2e#" \
       -e "s#image: registry.example.org/$1:1.0#image: spiffex-e2e-client:e2e\n          command: [sleep, \"86400\"]#" \
       deploy/kubernetes/workload.yaml | kubectl apply -f - >/dev/null
 }
@@ -143,7 +177,7 @@ check "a pod-bound token within the lifetime cap is exchanged" ok \
 
 echo "== state changes"
 set_state() { # state.yaml content
-  kubectl -n spiffex create configmap spiffex-state --from-literal=state.yaml="$1" --dry-run=client -o yaml |
+  kubectl -n spiffex create configmap "$STATE_CM" --from-literal=state.yaml="$1" --dry-run=client -o yaml |
     kubectl apply -f - >/dev/null 2>&1
 }
 # Both replicas must have taken up the change, so wait for several answers in
@@ -231,4 +265,45 @@ case $out in
   *"422 Unprocessable Entity"*"grants.cluster-writers"*"grant shop-admin"*) echo "ok: a grant breaking closure gets a 422 naming the grants" ;;
   *) echo "FAIL: the closure-breaking grant was refused for another reason: $out"; exit 1 ;;
 esac
+if [ "$INSTALL" = helm ]; then
+  echo "== helm lifecycle"
+  eventually() { for _ in $(seq 30); do "$@" && return 0; sleep 1; done; return 1; }
+  has_vms() { kubectl -n spiffex get configmap "$STATE_CM" -o jsonpath='{.data.state\.yaml}' | grep -q '^  vms:'; }
+  has_vms || { echo "FAIL: the state ConfigMap lacks the origin added through the API"; exit 1; }
+  # A settings change restarts the issuer; the state must survive the upgrade.
+  helm_issuer upgrade --set logLevel=debug
+  kubectl -n spiffex rollout status deploy/spiffex-issuer --timeout=120s >/dev/null
+  has_vms || { echo "FAIL: helm upgrade overwrote the state"; exit 1; }
+  eventually member_token || { echo "FAIL: after helm upgrade, the member gets no token"; exit 1; }
+  echo "ok: helm upgrade leaves the state alone"
+  # Revision 1 rendered the state ConfigMap, the current one does not, so Helm refuses to roll back
+  # to revision 1 when it reaches that ConfigMap ("no ConfigMap with the name ... found") and
+  # marks the rollback failed. Resources Helm updated before it reached that one, in its install
+  # order (the ServiceAccount, and ConfigMaps whose names sort first, such as the settings), may
+  # then hold revision 1's content; the Deployment, which comes later, keeps the current one. The
+  # next helm upgrade puts everything back in line.
+  generation=$(kubectl -n spiffex get deploy/spiffex-issuer -o jsonpath='{.metadata.generation}')
+  out=$(helm rollback spiffex-issuer 1 -n spiffex 2>&1) && { echo "FAIL: helm rollback to the install revision succeeded"; exit 1; }
+  case $out in
+    *"no ConfigMap with the name \"$STATE_CM\" found"*) ;;
+    *) echo "FAIL: helm rollback failed for another reason: $out"; exit 1 ;;
+  esac
+  has_vms || { echo "FAIL: helm rollback overwrote the state"; exit 1; }
+  [ "$(kubectl -n spiffex get deploy/spiffex-issuer -o jsonpath='{.metadata.generation}')" = "$generation" ] ||
+    { echo "FAIL: the failed rollback changed the Deployment"; exit 1; }
+  echo "ok: helm rollback to the install revision is refused and leaves the state alone"
+  helm_issuer upgrade --set logLevel=debug
+  kubectl -n spiffex rollout status deploy/spiffex-issuer --timeout=120s >/dev/null
+  has_vms || { echo "FAIL: the upgrade after the rollback overwrote the state"; exit 1; }
+  eventually member_token || { echo "FAIL: after the upgrade that follows the rollback, the member gets no token"; exit 1; }
+  echo "ok: an upgrade after the failed rollback restores the release"
+  helm uninstall spiffex-issuer -n spiffex --wait >/dev/null
+  has_vms || { echo "FAIL: helm uninstall removed the state"; exit 1; }
+  echo "ok: helm uninstall keeps the state ConfigMap"
+  helm_issuer install
+  kubectl -n spiffex rollout status deploy/spiffex-issuer --timeout=120s >/dev/null
+  has_vms || { echo "FAIL: reinstalling the chart overwrote the state"; exit 1; }
+  eventually member_token || { echo "FAIL: after reinstalling, the member gets no token"; exit 1; }
+  echo "ok: reinstalling the chart takes up the kept state"
+fi
 echo "== all checks passed"

@@ -1,0 +1,30 @@
+apiVersion: v2
+name: spiffex
+description: An OAuth 2.0 issuer of SPIFFE JWT-SVIDs, for workloads that prove themselves with keys or with tokens they already have
+type: application
+# The release workflow sets version and appVersion from the tag.
+version: 0.1.0-rc.1
+appVersion: "0.1.0-rc.1"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/PeterSR/spiffex
+sources:
+  - https://github.com/PeterSR/spiffex
+maintainers:
+  - name: Peter Severin Rasmussen
+    url: https://github.com/PeterSR
+keywords:
+  - spiffe
+  - jwt-svid
+  - oauth2
+  - oidc
+  - workload-identity
+  - zero-trust
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/category: security
+  artifacthub.io/prerelease: "true"
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://github.com/PeterSR/spiffex/blob/main/docs/kubernetes.md
+    - name: Specification
+      url: https://github.com/PeterSR/spiffex/blob/main/SPEC.md

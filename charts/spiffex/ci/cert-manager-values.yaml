@@ -1,0 +1,26 @@
+# TLS from cert-manager, management off, an image pinned by digest, the optional settings set.
+trustDomain: example.org
+management: false
+replicas: 3
+signingKeys: { existingSecret: keys }
+tls:
+  certManager:
+    enabled: true
+    issuerRef: { name: internal-ca, kind: ClusterIssuer }
+    dnsNames: [spiffex.example.org]
+image:
+  digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+readableFiles: [/var/run/secrets/kubernetes.io/serviceaccount/ca.crt]
+bearerTokenFiles:
+  - path: /var/run/secrets/kubernetes.io/serviceaccount/token
+    hosts: [kubernetes.default.svc.cluster.local]
+    paths: [/openid/v1/jwks, /.well-known/openid-configuration]
+verifierLimits: { perOrigin: 2, total: 8 }
+trustedProxies: [10.42.0.0/16]
+tokenTTL: 10m
+state:
+  content:
+    origins:
+      ci:
+        provider: github
+        with: { owner_id: "1234567", refs: [refs/heads/main] }

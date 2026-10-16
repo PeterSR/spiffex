@@ -1,0 +1,5 @@
+# A state ConfigMap the operator manages: the chart creates none and the Role names it.
+trustDomain: example.org
+signingKeys: { existingSecret: keys }
+tls: { existingSecret: tls }
+state: { existingConfigMap: my-state }

@@ -1,0 +1,28 @@
+{{- /*
+The state ConfigMap is created on install and never rendered again once it exists: from then on the
+management API, spiffex bootstrap and kubectl edit own it. The keep policy stops Helm from deleting
+it on the upgrade that no longer renders it, and on uninstall. Without cluster access (helm template,
+Argo CD) lookup finds nothing, so the ConfigMap is always rendered; see README.md.
+*/ -}}
+{{- if not .Values.state.existingConfigMap }}
+{{- $name := include "spiffex.stateConfigMap" . }}
+{{- if not (lookup "v1" "ConfigMap" .Release.Namespace $name) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spiffex.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+data:
+  state.yaml: |
+    {{- if .Values.state.content }}
+    {{- toYaml .Values.state.content | nindent 4 }}
+    {{- else }}
+    {}
+    {{- end }}
+{{- end }}
+{{- end }}

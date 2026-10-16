@@ -58,6 +58,30 @@ origins:
 
 A new issuer starts with an empty state, which admits nobody.
 
+## Install
+
+Each release, listed on [the releases page](https://github.com/PeterSR/spiffex/releases), comes as:
+
+- **Binaries** for Linux and macOS, amd64 and arm64: download the archive for your platform,
+  `checksums.txt` and its signature, and verify them ([RELEASING.md](RELEASING.md#verifying-a-release))
+  before unpacking `spiffex`.
+- **An image**, `ghcr.io/petersr/spiffex:v0.1.0-rc.1`, for `linux/amd64` and `linux/arm64`, distroless
+  and running as a non-root user. Pin it by digest once you have verified it.
+- **A Helm chart** for the issuer, `oci://ghcr.io/petersr/charts/spiffex`:
+
+  ```bash
+  helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.1.0-rc.1 \
+    --namespace spiffex -f values.yaml
+  ```
+
+  [docs/kubernetes.md](docs/kubernetes.md#with-helm) and the [chart's README](charts/spiffex/README.md)
+  describe its values; [deploy/kubernetes](deploy/kubernetes) has plain manifests for clusters
+  without Helm.
+
+Releases made after the repository went public are signed with cosign and carry build
+provenance; 0.1.0-rc.1, made while it was private, is unsigned. With Go 1.26 or newer,
+`go install github.com/PeterSR/spiffex/cmd/spiffex@latest` builds from source.
+
 ## Try it
 
 With Go 1.26 or newer:
@@ -132,8 +156,9 @@ kubectl -n shop exec deploy/billing -c spiffex-agent -- /spiffex token \
 
 ## Status
 
-Early development. The [specification](SPEC.md) is a draft at version 0, breaking changes are
-possible until version 1, and there is no release yet.
+Early development. The [specification](SPEC.md) is a draft at version 0, and breaking changes are
+possible until version 1. The first prerelease is 0.1.0-rc.1; [CHANGELOG.md](CHANGELOG.md) lists
+the changes and [RELEASING.md](RELEASING.md) how releases are made and verified.
 
 ## Contributing and security
 

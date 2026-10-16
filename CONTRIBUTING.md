@@ -16,7 +16,9 @@ specification. Contributions that keep it that way are the most welcome kind.
 | `docs/` | configuration, providers and verifiers, Kubernetes, the management API |
 | `examples/` | complete settings files and states; a test validates them and the examples in `docs/` |
 | `deploy/kubernetes/` | example manifests for the issuer and a workload |
-| `test/e2e/` | the end-to-end test on a kind cluster |
+| `charts/spiffex/` | the Helm chart for the issuer; `ci/` holds the value sets its tests render |
+| `test/e2e/` | the end-to-end tests on a kind cluster, with the manifests and with the chart |
+| `scripts/` | release helpers |
 
 ## Development
 
@@ -47,11 +49,18 @@ needs Go and [uv](https://docs.astral.sh/uv/):
 conformance/run.sh
 ```
 
-The end-to-end test on a kind cluster (needs docker, kind, kubectl and openssl) runs locally:
+The end-to-end test on a kind cluster (needs docker, kind, kubectl and openssl) runs locally, with
+the plain manifests and with the Helm chart (which also needs helm):
 
 ```bash
 test/e2e/kind.sh
+test/e2e/kind-helm.sh
 ```
+
+The `Makefile` has targets for all of this; `make help` lists them. `make test`, `make e2e` and
+`make e2e-helm` run in a PID namespace of their own, as above. `make lint` runs every linter CI
+runs, `make helm-lint` lints and renders the chart, and `make release-snapshot` builds the release
+artifacts locally. [RELEASING.md](RELEASING.md) describes releases.
 
 ## The interoperability contract
 

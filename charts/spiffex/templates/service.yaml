@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spiffex.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spiffex.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "spiffex.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: {{ if include "spiffex.tlsEnabled" . }}https{{ else }}http{{ end }}
+      port: {{ include "spiffex.servicePort" . }}
+      targetPort: issuer

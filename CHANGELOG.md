@@ -7,6 +7,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-rc.1] - 2026-10-16
+
 The first version: an issuer, an agent and the `spiffex` command, following version 0 of
 [the specification](SPEC.md).
 
@@ -48,8 +50,20 @@ The first version: an issuer, an agent and the `spiffex` command, following vers
   be set from the environment.
 - Example Kubernetes manifests, with the state in a ConfigMap and the agent as a native sidecar,
   and an end-to-end test on kind.
+- A Helm chart for the issuer, `oci://ghcr.io/petersr/charts/spiffex`, with the settings built
+  from values, the state ConfigMap written on install and never overwritten afterwards, signing
+  keys and TLS from existing Secrets or TLS from cert-manager. The end-to-end test runs with it
+  too.
+- Releases: binaries for Linux and macOS on amd64 and arm64 with checksums and SBOMs, a
+  multi-architecture image at `ghcr.io/petersr/spiffex`, and the chart, signed keylessly with
+  cosign and with build provenance attested once the repository is public. RELEASING.md describes
+  how to verify them. A release from a private repository is unsigned and has no attestations, so
+  this one has neither.
 - Documentation of configuration, providers and verifiers, Kubernetes and the management API, and
   an example multi-origin setup. A test validates the examples and the documentation's examples.
 - A conformance matrix: tokens from stock go-spiffe, py-spiffe and plain OAuth 2.0 clients verify
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
+
+[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.1.0-rc.1...HEAD
+[0.1.0-rc.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.0-rc.1

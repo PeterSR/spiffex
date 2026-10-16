@@ -1,0 +1,33 @@
+{{- if and .Values.tls.certManager.enabled (not .Values.tls.existingSecret) }}
+{{- $host := include "spiffex.host" . }}
+{{- $fullname := include "spiffex.fullname" . }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spiffex.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "spiffex.tlsSecret" . | quote }}
+  dnsNames:
+    - {{ $host }}
+    - {{ $fullname }}.{{ .Release.Namespace }}.svc.cluster.local
+    {{- with .Values.tls.certManager.dnsNames }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  {{- with .Values.tls.certManager.duration }}
+  duration: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.tls.certManager.renewBefore }}
+  renewBefore: {{ . | quote }}
+  {{- end }}
+  issuerRef:
+    name: {{ required "tls.certManager.issuerRef.name is required with tls.certManager.enabled" .Values.tls.certManager.issuerRef.name | quote }}
+    kind: {{ .Values.tls.certManager.issuerRef.kind | quote }}
+    group: {{ .Values.tls.certManager.issuerRef.group | quote }}
+{{- end }}

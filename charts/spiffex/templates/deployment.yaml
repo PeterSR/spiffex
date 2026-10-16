@@ -1,0 +1,125 @@
+{{- $tls := include "spiffex.tlsEnabled" . }}
+{{- $scheme := ternary "HTTPS" "HTTP" (eq $tls "true") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spiffex.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spiffex.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spiffex.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spiffex.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # The issuer reads its settings only at startup.
+        checksum/settings: {{ include "spiffex.settings" . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "spiffex.fullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: issuer
+          image: {{ include "spiffex.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - issuer
+            - -config=/config/issuer.yaml
+            - -listen=:8443
+            - -reload-interval={{ .Values.reloadInterval }}
+            - -log-level={{ .Values.logLevel }}
+            {{- if $tls }}
+            - -tls-cert=/tls/tls.crt
+            - -tls-key=/tls/tls.key
+            {{- end }}
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: issuer
+              containerPort: 8443
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: issuer
+              scheme: {{ $scheme }}
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: issuer
+              scheme: {{ $scheme }}
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: keys
+              mountPath: /keys
+              readOnly: true
+            {{- if $tls }}
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "spiffex.fullname" . | quote }}
+        - name: keys
+          secret:
+            secretName: {{ required "signingKeys.existingSecret is required: create it from the files of spiffex key add" .Values.signingKeys.existingSecret | quote }}
+            defaultMode: 0440
+        {{- if $tls }}
+        - name: tls
+          secret:
+            secretName: {{ include "spiffex.tlsSecret" . | quote }}
+            defaultMode: 0440
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

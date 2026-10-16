@@ -7,7 +7,7 @@
 # Adjust trust_domain, the cluster origin's namespaces, and its issuer if your
 # cluster's service account issuer differs
 # (kubectl get --raw /.well-known/openid-configuration). Pin the image to a
-# digest once releases publish one.
+# digest (RELEASING.md shows how to verify it).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -121,7 +121,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: issuer
-          image: ghcr.io/petersr/spiffex:latest
+          image: ghcr.io/petersr/spiffex:v0.1.0-rc.1
           args:
             - issuer
             - -config=/config/issuer.yaml

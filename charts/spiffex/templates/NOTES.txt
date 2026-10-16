@@ -1,0 +1,37 @@
+{{- $issuer := include "spiffex.issuer" . -}}
+{{- $fullname := include "spiffex.fullname" . -}}
+The spiffex issuer is installed in namespace {{ .Release.Namespace }}.
+
+Issuer URL:    {{ $issuer }}
+Trust domain:  {{ .Values.trustDomain }}
+Bundle:        {{ $issuer }}/bundle
+OIDC:          {{ $issuer }}/.well-known/openid-configuration
+
+An upstream token reaches an origin when it carries the origin audience
+  {{ $issuer }}/origins/<origin prefix>
+so a pod's projected service account token for an origin named "cluster" needs
+  {{ $issuer }}/origins/cluster
+
+The state is in ConfigMap {{ include "spiffex.stateConfigMap" . }}.
+{{- if not .Values.state.existingConfigMap }} The chart wrote it on install
+and leaves it alone from now on; helm uninstall keeps it.
+{{- end }}
+{{- if .Values.management }}
+
+Write the first grant of the management API from inside an issuer pod, for example:
+
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ $fullname }} -- /spiffex bootstrap \
+    -config /config/issuer.yaml -grant platform \
+    -who spiffe://{{ .Values.trustDomain }}/cluster/ns/platform/sa/admin
+{{- end }}
+{{- if not (include "spiffex.tlsEnabled" .) }}
+
+WARNING: TLS is off. The issuer serves plain HTTP on port 8443 (Service port
+{{ include "spiffex.servicePort" . }}). Clients must reach it only through a TLS-terminating proxy
+at {{ $issuer }}. Set tls.existingSecret or tls.certManager to serve TLS
+from the issuer itself.
+{{- end }}
+{{- if not .Values.image.digest }}
+
+The image is referenced by tag ({{ include "spiffex.image" . }}). Set image.digest to pin it.
+{{- end }}

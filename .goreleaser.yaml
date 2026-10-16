@@ -1,0 +1,114 @@
+# Release builds: binaries, archives, checksums, SBOMs, the GitHub release and the image.
+# .github/workflows/release.yml runs this on a v* tag; RELEASING.md describes the process.
+version: 2
+
+project_name: spiffex
+
+builds:
+  - id: spiffex
+    main: ./cmd/spiffex
+    binary: spiffex
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version=v{{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: spiffex
+    ids: [spiffex]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # Every file in the archives carries the commit time, so a rebuild of the same commit gives
+    # the same archives.
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: CHANGELOG.md
+        info:
+          mtime: "{{ .CommitDate }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - id: archives
+    artifacts: archive
+
+signs:
+  # Keyless, with the workflow's GitHub OIDC identity. The bundle holds the signature and the
+  # certificate; cosign verify-blob checks it (RELEASING.md).
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --yes
+      - --bundle=${signature}
+      - ${artifact}
+    output: true
+
+dockers_v2:
+  - id: spiffex
+    ids: [spiffex]
+    dockerfile: Dockerfile.goreleaser
+    images:
+      - ghcr.io/petersr/spiffex
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    # Only the version tag. The workflow moves X.Y and latest at the very end, once the chart is
+    # out too, and only for a release that is not a prerelease.
+    tags:
+      - "v{{ .Version }}"
+    labels:
+      org.opencontainers.image.title: spiffex
+      org.opencontainers.image.description: An OAuth 2.0 issuer of SPIFFE JWT-SVIDs, and a Workload API agent
+      org.opencontainers.image.source: https://github.com/PeterSR/spiffex
+      org.opencontainers.image.licenses: Apache-2.0
+      org.opencontainers.image.version: "v{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .CommitDate }}"
+    annotations:
+      org.opencontainers.image.source: https://github.com/PeterSR/spiffex
+      org.opencontainers.image.licenses: Apache-2.0
+      org.opencontainers.image.version: "v{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+    # Build provenance and an SBOM attached to the image. The local docker driver of a snapshot
+    # build cannot store attestations, so snapshots go without.
+    flags:
+      - "{{ if not .IsSnapshot }}--provenance=mode=max{{ end }}"
+      - "{{ if not .IsSnapshot }}--sbom=true{{ end }}"
+
+release:
+  github:
+    owner: PeterSR
+    name: spiffex
+  # A tag such as v0.1.0-rc.1 makes a prerelease.
+  prerelease: auto
+  # A draft until the chart is pushed too; the workflow then publishes it, as the latest release
+  # unless it is a prerelease.
+  draft: true
+  # A rerun of a failed release fills the same draft again instead of failing or making another.
+  use_existing_draft: true
+  replace_existing_artifacts: true
+  name_template: "v{{ .Version }}"
+
+# The notes come from CHANGELOG.md (scripts/changelog-section.sh), passed with --release-notes.
+changelog:
+  disable: true
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot.{{ .ShortCommit }}"

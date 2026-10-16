@@ -1,0 +1,7 @@
+# No TLS, behind a terminating proxy; an empty starting state; a state ConfigMap managed elsewhere
+# is not used here, so the chart creates one.
+issuer: https://spiffex.example.org
+trustDomain: example.org
+signingKeys: { existingSecret: keys }
+podDisruptionBudget: { enabled: false }
+replicas: 1

@@ -42,10 +42,12 @@ a pod is deleted: a token taken from a pod keeps working until it expires, at mo
 
 ## The issuer
 
-The manifests refer to the image `ghcr.io/petersr/spiffex:latest`. Once releases publish it, pin the
-image by digest (`ghcr.io/petersr/spiffex@sha256:...`) rather than a tag, so that what runs is what
-you checked. Until then, build the image from a checkout and push it somewhere your cluster pulls
-from, then change the `image:` lines:
+The issuer can be installed with the [Helm chart](#with-helm) or with the plain manifests in
+[deploy/kubernetes](../deploy/kubernetes), described here. The manifests refer to the image
+`ghcr.io/petersr/spiffex:v0.1.0-rc.1`. Pin it by digest (`ghcr.io/petersr/spiffex@sha256:...`)
+rather than a tag, so that what runs is what you checked; [RELEASING.md](../RELEASING.md#verifying-a-release)
+shows how to verify the image's signature and find its digest. To run a build of your own, build the
+image from a checkout and push it somewhere your cluster pulls from, then change the `image:` lines:
 
 ```bash
 docker build -t registry.example.org/spiffex:dev .
@@ -116,6 +118,47 @@ at most five minutes; service account token exchange is not affected, as it uses
 The same holds for management tokens: each replica remembers the ones it took a change from, so an
 intercepted management token could make one change on each replica within its five minutes.
 
+## With Helm
+
+The chart in [charts/spiffex](../charts/spiffex) deploys the same issuer, with the same hardening,
+and builds the settings from values. It is published with each release:
+
+```bash
+mkdir keys && spiffex key add -dir keys
+kubectl create namespace spiffex
+kubectl -n spiffex create secret generic spiffex-signing-keys --from-file=keys
+kubectl -n spiffex create secret tls spiffex-issuer-tls --cert=tls.crt --key=tls.key
+helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.1.0-rc.1 -n spiffex \
+  --set trustDomain=example.org \
+  --set signingKeys.existingSecret=spiffex-signing-keys \
+  --set tls.existingSecret=spiffex-issuer-tls \
+  -f state-values.yaml
+```
+
+where `state-values.yaml` holds the state to start with, under `state.content`:
+
+```yaml
+state:
+  content:
+    origins:
+      cluster:
+        provider: kubernetes
+        with:
+          namespaces: [shop]
+```
+
+The release name `spiffex-issuer` gives the issuer URL `https://spiffex-issuer.spiffex.svc` used
+throughout this page. The state ConfigMap is then `spiffex-issuer-state`, and the first grant is
+written with `spiffex bootstrap` in an issuer pod as above. Instead of a TLS Secret, the chart can
+ask cert-manager for the certificate (`tls.certManager`).
+
+The chart writes `state.content` to the state ConfigMap on install only, and never overwrites it
+afterwards, since the management API owns it from then on; `helm uninstall` leaves it in place.
+GitOps tools that render the chart with `helm template`, Argo CD among them, do not see that the
+ConfigMap exists and would put the initial state back on every sync: there, set
+`state.existingConfigMap` to a ConfigMap you create yourself, or have the tool ignore the
+ConfigMap's data. The [chart's README](../charts/spiffex/README.md) has the details and every value.
+
 ## A workload
 
 [deploy/kubernetes/workload.yaml](../deploy/kubernetes/workload.yaml) adds the agent to a pod as a
@@ -154,3 +197,6 @@ taken up while an invalid state is not. Last, it bootstraps a grant for one pod,
 origin and a member through the management API with its agent, and checks that a pod without a
 grant is refused and a grant that would break closure is refused with its reasons. It needs docker,
 kind, kubectl, openssl and Go, and removes the cluster and the images it built when it is done.
+[test/e2e/kind-helm.sh](../test/e2e/kind-helm.sh) runs the same test with the issuer installed by
+the chart, and then checks that upgrading, uninstalling and reinstalling the chart leave the state
+alone.

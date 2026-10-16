@@ -1,0 +1,155 @@
+# Values for the spiffex issuer. charts/spiffex/README.md describes each one; docs/configuration.md
+# describes the settings they become.
+
+# The issuer URL, which tokens carry as iss and which workloads and verifiers must reach exactly as
+# written. Left empty, it is https://<fullname>.<namespace>.svc, which needs TLS (tls.existingSecret
+# or tls.certManager). Without TLS it must be given: the URL of the proxy in front of the issuer.
+issuer: ""
+
+# The trust domain of the SPIFFE IDs the issuer issues (required).
+trustDomain: ""
+
+# Lifetime of issued JWT-SVIDs, at most 1h.
+tokenTTL: 5m
+
+# How long a new signing key is published before it signs.
+activationDelay: 30m
+
+# Serve the management API at <issuer>/manage. Nobody can use it until spiffex bootstrap has
+# written a first grant. Off, the issuer may only read its state ConfigMap.
+management: true
+
+# How often the issuer checks the state and the signing keys for changes.
+reloadInterval: 10s
+
+logLevel: info
+
+# Key fetches for jwt origins.
+fetch:
+  # Refuse fetches to loopback, link-local, private and other non-public addresses.
+  refusePrivateAddresses: true
+  # host:port pairs exempt from that. The default is the in-cluster API server, which the shipped
+  # kubernetes provider reads the cluster's keys from. A list given replaces it.
+  allowPrivateHosts:
+    - kubernetes.default.svc.cluster.local:443
+
+# The settings below are left out of the settings file unless set, so the issuer's defaults apply:
+# exactly what the shipped kubernetes provider needs, no verifiers, the default verifier limits.
+#
+# readableFiles: [/var/run/secrets/kubernetes.io/serviceaccount/ca.crt]
+# bearerTokenFiles:
+#   - path: /var/run/secrets/kubernetes.io/serviceaccount/token
+#     hosts: [kubernetes.default.svc.cluster.local]
+#     paths: [/openid/v1/jwks, /.well-known/openid-configuration]
+# verifiers:
+#   - [/usr/libexec/spiffex/aws-verifier, --partition, aws]
+# verifierLimits: { perOrigin: 4, total: 16, perAddressPerMinute: 60, perAddressBurst: 10 }
+# verifierUser: { uid: 65533, gid: 65533 }
+
+# Peers, such as an ingress, whose X-Forwarded-For header names the client.
+trustedProxies: []
+
+# The issuer's state: origins, providers and grants. The chart writes it to the state ConfigMap on
+# install only and never touches it again: once the issuer runs, the management API, spiffex
+# bootstrap and kubectl edit change it. See README.md, "The state ConfigMap".
+state:
+  # A ConfigMap you create and manage yourself, in the release namespace, holding state.yaml. When
+  # set, the chart creates no state ConfigMap and the content below is not used.
+  existingConfigMap: ""
+  # The state document to start with. Empty admits nobody.
+  content: {}
+  #   origins:
+  #     cluster:
+  #       provider: kubernetes
+  #       with:
+  #         namespaces: [shop]
+
+signingKeys:
+  # The Secret holding the signing keys, one PEM file per key, made with spiffex key add (required).
+  existingSecret: ""
+
+tls:
+  # A kubernetes.io/tls Secret with tls.crt and tls.key, valid for the issuer's host name.
+  existingSecret: ""
+  # Or a cert-manager Certificate, for <fullname>.<namespace>.svc and the names below.
+  certManager:
+    enabled: false
+    issuerRef:
+      name: ""
+      kind: Issuer
+      group: cert-manager.io
+    dnsNames: []
+    duration: ""
+    renewBefore: ""
+  # With neither, the issuer serves plain HTTP and must sit behind a TLS-terminating proxy.
+
+image:
+  repository: ghcr.io/petersr/spiffex
+  # Defaults to v<appVersion>.
+  tag: ""
+  # sha256:..., to pin the image. With a digest the tag is ignored.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+replicas: 2
+
+serviceAccount:
+  annotations: {}
+
+service:
+  type: ClusterIP
+  # Defaults to 443 with TLS and 80 without.
+  port: null
+  annotations: {}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  # The key files are readable by this group alone (mode 0440), which the issuer's user is in and a
+  # verifier user would not be.
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+readinessProbe:
+  periodSeconds: 5
+  failureThreshold: 3
+
+livenessProbe:
+  periodSeconds: 10
+  failureThreshold: 6
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+# Extra volumes and mounts, for instance for exec verifiers or files the state may read.
+extraVolumes: []
+extraVolumeMounts: []
+extraEnv: []
