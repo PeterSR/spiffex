@@ -15,7 +15,8 @@
 # charts/spiffex instead of deploy/kubernetes/issuer.yaml, runs the same
 # checks, and then checks that upgrading, rolling back to the install
 # revision, uninstalling and reinstalling the chart leave the state the
-# management API wrote alone.
+# management API wrote alone. It also has the API server check the chart rendered with the ingress
+# on, which kind cannot route.
 #
 # Needs docker, kind, kubectl, openssl and Go, and helm with INSTALL=helm.
 # KEEP=1 leaves the cluster up after the run, for a look around.
@@ -305,5 +306,10 @@ if [ "$INSTALL" = helm ]; then
   has_vms || { echo "FAIL: reinstalling the chart overwrote the state"; exit 1; }
   eventually member_token || { echo "FAIL: after reinstalling, the member gets no token"; exit 1; }
   echo "ok: reinstalling the chart takes up the kept state"
+  # kind has no ingress controller, so the ingress value set is only rendered and checked by the
+  # API server, without its ExternalSecret, whose CRD the cluster lacks.
+  helm template spiffex-issuer charts/spiffex -n spiffex -f charts/spiffex/ci/ingress-values.yaml --set extraObjects=null |
+    kubectl apply --dry-run=server --server-side --force-conflicts --field-manager=e2e-ingress -f - >/dev/null || { echo "FAIL: the API server refuses the ingress value set"; exit 1; }
+  echo "ok: the API server accepts the chart with the ingress on"
 fi
 echo "== all checks passed"

@@ -15,8 +15,15 @@ metadata:
   labels:
     {{- include "spiffex.labels" . | nindent 4 }}
   annotations:
-    helm.sh/resource-policy: keep
-    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+    {{- $annotations := deepCopy (.Values.state.configMapAnnotations | default dict) }}
+    {{- $syncOptions := list }}
+    {{- range splitList "," (get $annotations "argocd.argoproj.io/sync-options") }}
+    {{- if trim . }}{{ $syncOptions = append $syncOptions (trim .) }}{{ end }}
+    {{- end }}
+    {{- $syncOptions = concat $syncOptions (list "Prune=false" "Delete=false") | uniq }}
+    {{- $_ := set $annotations "argocd.argoproj.io/sync-options" (join "," $syncOptions) }}
+    {{- $_ = set $annotations "helm.sh/resource-policy" "keep" }}
+    {{- toYaml $annotations | nindent 4 }}
 data:
   state.yaml: |
     {{- if .Values.state.content }}

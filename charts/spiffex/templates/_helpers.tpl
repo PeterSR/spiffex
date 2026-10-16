@@ -41,6 +41,12 @@ app.kubernetes.io/component: issuer
 {{- end }}
 
 {{- define "spiffex.issuer" -}}
+{{- if .Values.ingress.enabled }}
+{{- $want := printf "https://%s" (required "ingress.host is required with ingress.enabled" .Values.ingress.host) }}
+{{- if ne .Values.issuer $want }}
+{{- fail (printf "issuer must be %s, not %q: with ingress.enabled, clients reach the issuer at the ingress host, and tokens must carry that URL as iss" $want .Values.issuer) }}
+{{- end }}
+{{- end }}
 {{- if .Values.issuer }}
 {{- .Values.issuer }}
 {{- else if include "spiffex.tlsEnabled" . }}

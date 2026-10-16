@@ -44,7 +44,7 @@ state:
           namespaces: [shop]
 EOF
 
-helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.1.0 \
+helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.1.1 \
   --namespace spiffex -f values.yaml
 ```
 
@@ -64,12 +64,135 @@ One of three:
 - `tls.certManager.enabled` with `tls.certManager.issuerRef`: the chart makes a cert-manager
   `Certificate` for `<fullname>.<namespace>.svc`, `<fullname>.<namespace>.svc.cluster.local` and
   `tls.certManager.dnsNames`. The issuer takes up renewed certificates without a restart.
-- Neither: the issuer serves plain HTTP, for a TLS-terminating proxy in front of it. `issuer` must
-  then be the URL clients reach through that proxy, and `trustedProxies` should list the proxy so
-  per-client limits apply to clients. The install notes warn about it.
+- Neither: the issuer serves plain HTTP, for a TLS-terminating proxy in front of it, such as the
+  chart's own [Ingress](#ingress). `issuer` must then be the URL clients reach through that proxy,
+  and `trustedProxies` should list the proxy so per-client limits apply to clients. The install
+  notes warn about it.
 
 Without `issuer`, the issuer URL is `https://<fullname>.<namespace>.svc`. Whatever it is, it must be
 exactly what workloads and verifiers use, since tokens carry it as `iss`.
+
+## Ingress
+
+`ingress.enabled` adds an Ingress that routes every path of `ingress.host` to the issuer's Service,
+for an issuer that workloads and verifiers outside the cluster reach. The issuer URL is then
+`https://<ingress.host>`, and the chart refuses any other `issuer`, since tokens carry it as `iss`
+and it must be what clients reach. Workloads in the cluster use that public URL too, not the
+Service's name. Usually the ingress terminates TLS and the issuer, with neither
+`tls.existingSecret` nor `tls.certManager`, serves plain HTTP inside the cluster. With ingress-nginx
+and cert-manager:
+
+```yaml
+issuer: https://spiffex.example.org
+trustDomain: example.org
+signingKeys:
+  existingSecret: spiffex-signing-keys
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  host: spiffex.example.org
+  tls:
+    secretName: spiffex-public-tls
+```
+
+With `ingress.tls.secretName` empty the Ingress has no `tls` section, for a controller that serves a
+default certificate or a load balancer in front that terminates TLS. With TLS in the pod as well,
+the ingress must speak HTTPS to the issuer: the chart adds the ingress-nginx annotation
+`nginx.ingress.kubernetes.io/backend-protocol: HTTPS` unless `ingress.annotations` sets it. Other
+controllers need their own equivalent in `ingress.annotations`.
+
+**`trustedProxies` behind an ingress.** Only the per-address limits on exec verifiers
+(`verifierLimits.perAddressPerMinute` and `perAddressBurst`) use client addresses; nothing else in
+the issuer does. Without exec origins, leave `trustedProxies` empty: that fails safe.
+
+With exec origins, every request behind an ingress arrives from the ingress controller, so without
+`trustedProxies` all clients share one limit, and one busy client uses it up for everyone. The
+controller names the client in `X-Forwarded-For`, and the issuer believes that header only from
+addresses in `trustedProxies`; it then takes the rightmost address in the header that is not
+itself trusted, so addresses a client writes into the header itself are not believed. Set
+`trustedProxies` to the addresses the controller's connections to the issuer come from:
+
+- A controller in ordinary pods connects from its pod addresses, which change with every restart,
+  so list the pod CIDR its pods get addresses from (the cluster's pod CIDR, when they can land on
+  any node). It differs per distribution: RKE2 and k3s default to `10.42.0.0/16`, kind to
+  `10.244.0.0/16`.
+- A controller with `hostNetwork: true`, common for an ingress-nginx DaemonSet, connects from the
+  node: its node IP, or, for an issuer pod on another node, often the CNI's tunnel or bridge address
+  on that node, which with flannel or canal lies inside the pod CIDR. List the node addresses and
+  the pod CIDR.
+
+To check, see whether the controller uses the host network, and which addresses its pods have. Its
+namespace varies (`ingress-nginx` for the upstream chart, `kube-system` for RKE2's built-in one),
+so look in all of them:
+
+```bash
+kubectl get daemonset,deployment -A -l app.kubernetes.io/name=ingress-nginx \
+  -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}: hostNetwork={.spec.template.spec.hostNetwork}{"\n"}{end}'
+kubectl get pods -A -l app.kubernetes.io/name=ingress-nginx -o wide
+```
+
+The issuer logs a client address only when the per-address limit refuses it (`token request
+failed`, with `client <address>`); while `trustedProxies` is incomplete, that address is the
+controller's, not the caller's.
+
+The trade-off: every address in `trustedProxies` can name any client it likes. When it is a pod
+CIDR, any pod that can reach the issuer's Service directly can spread its requests over invented
+addresses to escape its own limit, or charge them to someone else's address to use up theirs. A
+NetworkPolicy that admits only the ingress controller to the issuer closes that; in-cluster
+workloads then go through the ingress, as they must anyway to reach the public issuer URL. Leaving
+`trustedProxies` empty is safe but makes the per-address limits one shared limit. When a load
+balancer in front of the controller hides the real client address, the controller must learn it
+first (for ingress-nginx, PROXY protocol or `use-forwarded-headers`), or it names the load balancer
+as the client.
+
+## Signing keys from a secret manager
+
+`extraObjects` renders further manifests with the release, each passed through `tpl`, so a GitOps
+setup can ship the `signingKeys.existingSecret` Secret with the chart. Because of `tpl`, any `{{ }}`
+meant for the object itself, such as an ExternalSecret's `target.template`, must be escaped so the
+chart passes it through: write `{{ "{{ .password }}" }}` for `{{ .password }}`. With the
+[External Secrets Operator](https://external-secrets.io) and AWS Systems Manager Parameter Store,
+this ExternalSecret puts every parameter under `/spiffex/prod/signing-keys/` into the Secret, one file
+per key named after the parameter:
+
+```yaml
+signingKeys:
+  existingSecret: spiffex-signing-keys
+extraObjects:
+  - apiVersion: external-secrets.io/v1
+    kind: ExternalSecret
+    metadata:
+      name: '{{ .Values.signingKeys.existingSecret }}'
+      namespace: '{{ .Release.Namespace }}'
+    spec:
+      refreshInterval: 1h
+      secretStoreRef: { kind: ClusterSecretStore, name: aws-parameter-store }
+      target: { name: '{{ .Values.signingKeys.existingSecret }}' }
+      dataFrom:
+        - find:
+            path: /spiffex/prod/signing-keys
+            name: { regexp: '/key-[0-9]{8}T[0-9]{6}Z\.pem$' }
+          rewrite:
+            - regexp: { source: '^/spiffex/prod/signing-keys/(.*)$', target: '$1' }
+```
+
+The SecretStore's IAM role needs `ssm:DescribeParameters` on `*`, which `find` lists parameters with
+and which AWS does not scope to a path, and `ssm:GetParameter*` on
+`arn:aws:ssm:<region>:<account>:parameter/spiffex/prod/signing-keys/*`, plus `kms:Decrypt` on the
+KMS key that encrypts the parameters. Store each key as a SecureString parameter named like the file `spiffex key add` writes:
+
+```bash
+spiffex key add -dir keys   # writes keys/key-20261016T120000Z.pem
+aws ssm put-parameter --type SecureString \
+  --name /spiffex/prod/signing-keys/key-20261016T120000Z.pem --value file://keys/key-20261016T120000Z.pem
+```
+
+Adding a key is then adding a parameter: the operator writes it into the Secret at the next refresh,
+and the issuer takes it up and publishes it for the activation delay before it signs. Delete a
+parameter only when the pruning rule in
+[docs/configuration.md](../../docs/configuration.md#rotating-signing-keys) allows removing that key.
 
 ## The state ConfigMap
 
@@ -96,8 +219,10 @@ yours.
 **Argo CD and other GitOps tools** render the chart with `helm template`, where the lookup finds
 nothing, so the ConfigMap is always rendered with `state.content` and a sync would overwrite what
 the management API wrote. The ConfigMap carries `argocd.argoproj.io/sync-options:
-Prune=false,Delete=false`, so Argo CD never deletes it, but it still updates it. Either set
-`state.existingConfigMap` and keep the state out of Git, or tell Argo CD to ignore the data:
+Prune=false,Delete=false`, so Argo CD never deletes it, but it still updates it. The safe setup is
+to tell Argo CD to ignore the ConfigMap's data and to respect that when it syncs, not only when it
+compares. Git then provides the initial state once, when Argo CD creates the ConfigMap, and never
+overwrites what the management API writes afterwards:
 
 ```yaml
 spec:
@@ -108,6 +233,12 @@ spec:
   syncPolicy:
     syncOptions: [RespectIgnoreDifferences=true]
 ```
+
+Without `RespectIgnoreDifferences=true`, `ignoreDifferences` only hides the difference, and the
+next sync still applies `state.content`. Alternatively, set `state.existingConfigMap` and keep the
+state out of Git. `state.configMapAnnotations` adds further annotations to the ConfigMap, for
+instance other Argo CD options. An `argocd.argoproj.io/sync-options` given there keeps its options,
+and the chart adds `Prune=false` and `Delete=false` to them when missing.
 
 Flux's helm-controller runs real installs and upgrades, where the lookup works as with `helm`.
 
@@ -129,9 +260,15 @@ Flux's helm-controller runs real installs and upgrades, where the lookup works a
 | `verifiers` | unset | Installed exec verifiers, each a list of an absolute path and fixed arguments. Mount them with `extraVolumes`. |
 | `verifierLimits` | unset | `{perOrigin, total, perAddressPerMinute, perAddressBurst}`. |
 | `verifierUser` | unset | `{uid, gid}` exec verifiers run as. Needs CAP_SETUID, CAP_SETGID and CAP_KILL in `securityContext`. |
-| `trustedProxies` | `[]` | Addresses or CIDRs whose `X-Forwarded-For` names the client. |
+| `trustedProxies` | `[]` | Addresses or CIDRs whose `X-Forwarded-For` names the client. Only exec verifiers' per-address limits use it; behind an ingress, the controller's source addresses. See [Ingress](#ingress). |
+| `ingress.enabled` | `false` | Add an Ingress routing every path of `ingress.host` to the issuer. `issuer` must then be `https://<ingress.host>`. |
+| `ingress.className` | `""` | The Ingress's `ingressClassName`, when set. |
+| `ingress.annotations` | `{}` | For instance `cert-manager.io/cluster-issuer: letsencrypt-prod`. With TLS in the pod, `nginx.ingress.kubernetes.io/backend-protocol: HTTPS` is added unless set here. |
+| `ingress.host` | `""` | The host clients reach the issuer at (required with the ingress). |
+| `ingress.tls.secretName` | `""` | The Secret with the host's certificate. Empty leaves the `tls` section out. |
 | `state.existingConfigMap` | `""` | A state ConfigMap you manage; the chart then creates none. |
 | `state.content` | `{}` | The state written on install, and never again. Empty admits nobody. |
+| `state.configMapAnnotations` | `{}` | Further annotations on the state ConfigMap the chart creates. `helm.sh/resource-policy: keep` is always set, and `Prune=false,Delete=false` is added to any `argocd.argoproj.io/sync-options` given. |
 | `signingKeys.existingSecret` | `""` | The Secret with the signing keys (required). |
 | `tls.existingSecret` | `""` | A TLS Secret for the issuer. |
 | `tls.certManager.enabled` | `false` | Make a cert-manager `Certificate` instead. |
@@ -159,6 +296,7 @@ Flux's helm-controller runs real installs and upgrades, where the lookup works a
 | `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | empty | |
 | `topologySpreadConstraints` | `[]` | Empty spreads the replicas across nodes (`kubernetes.io/hostname`) and zones (`topology.kubernetes.io/zone`), `maxSkew: 1`, `whenUnsatisfiable: ScheduleAnyway`, so a single-node cluster still schedules them. A list given replaces this default. |
 | `extraVolumes`, `extraVolumeMounts`, `extraEnv` | `[]` | |
+| `extraObjects` | `[]` | Further manifests, as maps or strings, each passed through `tpl`. See [Signing keys from a secret manager](#signing-keys-from-a-secret-manager). |
 
 `values.schema.json` refuses unknown values. The settings these values become are described in
 [docs/configuration.md](../../docs/configuration.md); the chart's tests render each value set in

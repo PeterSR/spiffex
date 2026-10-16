@@ -1,0 +1,34 @@
+# A public issuer behind ingress-nginx: the ingress terminates TLS with a certificate from
+# cert-manager, the issuer serves plain HTTP inside the cluster, the state ConfigMap carries Argo CD
+# annotations, and the signing key Secret comes from an ExternalSecret shipped with the release.
+# trustedProxies stays empty: there are no exec origins, so no limit counts client addresses.
+issuer: https://spiffex.example.org
+trustDomain: example.org
+signingKeys: { existingSecret: spiffex-signing-keys }
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  host: spiffex.example.org
+  tls: { secretName: spiffex-public-tls }
+state:
+  configMapAnnotations:
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+extraObjects:
+  - apiVersion: external-secrets.io/v1
+    kind: ExternalSecret
+    metadata:
+      name: '{{ .Values.signingKeys.existingSecret }}'
+      namespace: '{{ .Release.Namespace }}'
+    spec:
+      refreshInterval: 1h
+      secretStoreRef: { kind: ClusterSecretStore, name: aws-parameter-store }
+      target: { name: '{{ .Values.signingKeys.existingSecret }}' }
+      dataFrom:
+        - find:
+            path: /spiffex/prod/signing-keys
+            name: { regexp: '/key-[0-9]{8}T[0-9]{6}Z\.pem$' }
+          rewrite:
+            - regexp: { source: '^/spiffex/prod/signing-keys/(.*)$', target: '$1' }

@@ -1,0 +1,40 @@
+{{- if .Values.ingress.enabled }}
+{{- /* The issuer helper refuses an issuer URL that is not https://<host>. */ -}}
+{{- $_ := include "spiffex.issuer" . }}
+{{- $annotations := deepCopy (.Values.ingress.annotations | default dict) }}
+{{- if and (include "spiffex.tlsEnabled" .) (not (hasKey $annotations "nginx.ingress.kubernetes.io/backend-protocol")) }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/backend-protocol" "HTTPS" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "spiffex.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "spiffex.labels" . | nindent 4 }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ingress.tls.secretName }}
+  tls:
+    - hosts:
+        - {{ $.Values.ingress.host | quote }}
+      secretName: {{ . | quote }}
+  {{- end }}
+  rules:
+    - host: {{ required "ingress.host is required with ingress.enabled" .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "spiffex.fullname" . }}
+                port:
+                  number: {{ include "spiffex.servicePort" . }}
+{{- end }}

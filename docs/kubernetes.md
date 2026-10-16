@@ -44,7 +44,7 @@ a pod is deleted: a token taken from a pod keeps working until it expires, at mo
 
 The issuer can be installed with the [Helm chart](#with-helm) or with the plain manifests in
 [deploy/kubernetes](../deploy/kubernetes), described here. The manifests refer to the image
-`ghcr.io/petersr/spiffex:v0.1.0`. Pin it by digest (`ghcr.io/petersr/spiffex@sha256:...`)
+`ghcr.io/petersr/spiffex:v0.1.1`. Pin it by digest (`ghcr.io/petersr/spiffex@sha256:...`)
 rather than a tag, so that what runs is what you checked; [RELEASING.md](../RELEASING.md#verifying-a-release)
 shows how to verify the image's signature and find its digest. To run a build of your own, build the
 image from a checkout and push it somewhere your cluster pulls from, then change the `image:` lines:
@@ -128,7 +128,7 @@ mkdir keys && spiffex key add -dir keys
 kubectl create namespace spiffex
 kubectl -n spiffex create secret generic spiffex-signing-keys --from-file=keys
 kubectl -n spiffex create secret tls spiffex-issuer-tls --cert=tls.crt --key=tls.key
-helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.1.0 -n spiffex \
+helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.1.1 -n spiffex \
   --set trustDomain=example.org \
   --set signingKeys.existingSecret=spiffex-signing-keys \
   --set tls.existingSecret=spiffex-issuer-tls \

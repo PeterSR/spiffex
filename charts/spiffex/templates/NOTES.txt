@@ -24,7 +24,23 @@ Write the first grant of the management API from inside an issuer pod, for examp
     -config /config/issuer.yaml -grant platform \
     -who spiffe://{{ .Values.trustDomain }}/cluster/ns/platform/sa/admin
 {{- end }}
-{{- if not (include "spiffex.tlsEnabled" .) }}
+{{- if .Values.ingress.enabled }}
+
+The Ingress {{ $fullname }} passes every path of {{ .Values.ingress.host }} to the issuer
+{{- if include "spiffex.tlsEnabled" . }}, over HTTPS
+{{- else }}, and
+terminates TLS: the issuer serves plain HTTP inside the cluster
+{{- end }} (Service port {{ include "spiffex.servicePort" . }}).
+The issuer URL is therefore
+  https://{{ .Values.ingress.host }}
+and workloads and verifiers must use exactly that, inside the cluster too.
+{{- if not .Values.trustedProxies }}
+
+trustedProxies is empty, so if the state has exec origins, every client seems to
+come from the ingress controller and shares one per-address verifier limit.
+Without exec origins this does not matter. The chart README says what to set.
+{{- end }}
+{{- else if not (include "spiffex.tlsEnabled" .) }}
 
 WARNING: TLS is off. The issuer serves plain HTTP on port 8443 (Service port
 {{ include "spiffex.servicePort" . }}). Clients must reach it only through a TLS-terminating proxy

@@ -3,7 +3,8 @@
 
 # The issuer URL, which tokens carry as iss and which workloads and verifiers must reach exactly as
 # written. Left empty, it is https://<fullname>.<namespace>.svc, which needs TLS (tls.existingSecret
-# or tls.certManager). Without TLS it must be given: the URL of the proxy in front of the issuer.
+# or tls.certManager). Without TLS it must be given: the URL of the proxy in front of the issuer,
+# which with the ingress below is https://<ingress.host>.
 issuer: ""
 
 # The trust domain of the SPIFFE IDs the issuer issues (required).
@@ -46,8 +47,24 @@ fetch:
 # verifierLimits: { perOrigin: 4, total: 16, perAddressPerMinute: 60, perAddressBurst: 10 }
 # verifierUser: { uid: 65533, gid: 65533 }
 
-# Peers, such as an ingress, whose X-Forwarded-For header names the client.
+# Peers, such as an ingress controller, whose X-Forwarded-For header names the client. Only the
+# per-address limits of exec verifiers use client addresses; without exec origins, leave it empty.
+# README.md, "Ingress", says what to list behind an ingress and what that trusts.
 trustedProxies: []
+
+# An Ingress routing every path of host to the issuer's Service; issuer must then be
+# https://<host>. With no TLS in the pod (neither tls.existingSecret nor tls.certManager), the
+# issuer serves plain HTTP inside the cluster; with it, the ingress-nginx annotation
+# nginx.ingress.kubernetes.io/backend-protocol: HTTPS is added unless annotations sets it.
+ingress:
+  enabled: false
+  className: ""
+  # For instance cert-manager.io/cluster-issuer: letsencrypt-prod.
+  annotations: {}
+  host: ""
+  tls:
+    # The Secret holding the host's certificate. Empty leaves the tls section out of the Ingress.
+    secretName: ""
 
 # The issuer's state: origins, providers and grants. The chart writes it to the state ConfigMap on
 # install only and never touches it again: once the issuer runs, the management API, spiffex
@@ -63,6 +80,10 @@ state:
   #       provider: kubernetes
   #       with:
   #         namespaces: [shop]
+  # Further annotations on the state ConfigMap the chart creates, for instance Argo CD's.
+  # helm.sh/resource-policy: keep is always set, and Prune=false,Delete=false is added to any
+  # argocd.argoproj.io/sync-options given.
+  configMapAnnotations: {}
 
 signingKeys:
   # The Secret holding the signing keys, one PEM file per key, made with spiffex key add (required).
@@ -156,3 +177,7 @@ priorityClassName: ""
 extraVolumes: []
 extraVolumeMounts: []
 extraEnv: []
+
+# Further manifests to render with the release, as maps or strings, each passed through tpl. For
+# instance an ExternalSecret that makes the signingKeys.existingSecret Secret; see README.md.
+extraObjects: []

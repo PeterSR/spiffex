@@ -314,3 +314,253 @@ func TestChartTopologySpread(t *testing.T) {
 func schemaErrorNames(msg, path string) bool {
 	return strings.Contains(msg, path) || strings.Contains(msg, "/"+strings.ReplaceAll(path, ".", "/"))
 }
+
+// renderObjects renders the chart and decodes every object it renders as a
+// plain map.
+func renderObjects(t *testing.T, helm string, args ...string) ([]map[string]any, error) {
+	t.Helper()
+	cmd := exec.Command(helm, append([]string{"template", "spiffex-issuer", chartDir, "--namespace", "spiffex"}, args...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, errors.New(stderr.String())
+	}
+	var objects []map[string]any
+	dec := yaml.NewDecoder(bytes.NewReader(out))
+	for {
+		var o map[string]any
+		err := dec.Decode(&o)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o != nil {
+			objects = append(objects, o)
+		}
+	}
+	return objects, nil
+}
+
+func findObject(objects []map[string]any, kind string) map[string]any {
+	for _, o := range objects {
+		if o["kind"] == kind {
+			return o
+		}
+	}
+	return nil
+}
+
+// The Ingress routes every path of its host to the Service, with the TLS
+// Secret given, and with no TLS in the pod the issuer URL must be the
+// ingress host's.
+func TestChartIngress(t *testing.T) {
+	helm := helmPath(t)
+	values := []string{"-f", filepath.Join(chartDir, "ci", "ingress-values.yaml")}
+	objects, err := renderObjects(t, helm, values...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress := findObject(objects, "Ingress")
+	if ingress == nil {
+		t.Fatal("no Ingress rendered")
+	}
+	var spec struct {
+		IngressClassName string `yaml:"ingressClassName"`
+		TLS              []struct {
+			Hosts      []string `yaml:"hosts"`
+			SecretName string   `yaml:"secretName"`
+		} `yaml:"tls"`
+		Rules []struct {
+			Host string `yaml:"host"`
+			HTTP struct {
+				Paths []struct {
+					Path     string `yaml:"path"`
+					PathType string `yaml:"pathType"`
+					Backend  struct {
+						Service struct {
+							Name string `yaml:"name"`
+							Port struct {
+								Number int `yaml:"number"`
+							} `yaml:"port"`
+						} `yaml:"service"`
+					} `yaml:"backend"`
+				} `yaml:"paths"`
+			} `yaml:"http"`
+		} `yaml:"rules"`
+	}
+	raw, err := yaml.Marshal(ingress["spec"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(raw, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.IngressClassName != "nginx" {
+		t.Errorf("ingressClassName is %q", spec.IngressClassName)
+	}
+	if len(spec.TLS) != 1 || !slices.Equal(spec.TLS[0].Hosts, []string{"spiffex.example.org"}) || spec.TLS[0].SecretName != "spiffex-public-tls" {
+		t.Errorf("the tls section is %+v", spec.TLS)
+	}
+	if len(spec.Rules) != 1 || spec.Rules[0].Host != "spiffex.example.org" || len(spec.Rules[0].HTTP.Paths) != 1 {
+		t.Fatalf("the rules are %+v", spec.Rules)
+	}
+	path := spec.Rules[0].HTTP.Paths[0]
+	if path.Path != "/" || path.PathType != "Prefix" || path.Backend.Service.Name != "spiffex-issuer" || path.Backend.Service.Port.Number != 80 {
+		t.Errorf("the path is %+v", path)
+	}
+	annotations, _ := ingress["metadata"].(map[string]any)["annotations"].(map[string]any)
+	if annotations["cert-manager.io/cluster-issuer"] != "letsencrypt-prod" {
+		t.Errorf("the Ingress's annotations are %v", annotations)
+	}
+	settings := find(mustObjects(t, helm, values...), "ConfigMap", "spiffex-issuer").Data["issuer.yaml"]
+	if !strings.Contains(settings, `issuer: "https://spiffex.example.org"`) || strings.Contains(findObjectText(t, objects, "Deployment"), "-tls-cert") {
+		t.Errorf("the issuer is not plain HTTP at the ingress host:\n%s", settings)
+	}
+
+	// Without a TLS Secret the Ingress has no tls section; without the
+	// ingress there is none at all.
+	objects, err = renderObjects(t, helm, append(slices.Clone(values), "--set", "ingress.tls.secretName=")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := findObject(objects, "Ingress")["spec"].(map[string]any)["tls"]; ok {
+		t.Error("an Ingress without a TLS Secret has a tls section")
+	}
+	objects, err = renderObjects(t, helm, append(slices.Clone(values), "--set", "ingress.enabled=false")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findObject(objects, "Ingress") != nil {
+		t.Error("an Ingress is rendered with ingress.enabled false")
+	}
+
+	// With TLS in the pod as well, ingress-nginx is told to speak HTTPS to
+	// the issuer's HTTPS port, unless the annotation is given.
+	tlsInPod := append(slices.Clone(values), "--set", "tls.existingSecret=tls")
+	objects, err = renderObjects(t, helm, tlsInPod...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := findObjectText(t, objects, "Ingress")
+	if !strings.Contains(text, "nginx.ingress.kubernetes.io/backend-protocol: HTTPS") || !strings.Contains(text, "number: 443") ||
+		!strings.Contains(text, "cert-manager.io/cluster-issuer: letsencrypt-prod") {
+		t.Errorf("with TLS in the pod, the Ingress is:\n%s", text)
+	}
+	objects, err = renderObjects(t, helm, append(slices.Clone(tlsInPod), "--set", `ingress.annotations.nginx\.ingress\.kubernetes\.io/backend-protocol=GRPCS`)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := findObjectText(t, objects, "Ingress"); !strings.Contains(text, "backend-protocol: GRPCS") || strings.Contains(text, "backend-protocol: HTTPS") {
+		t.Errorf("a backend protocol given was replaced:\n%s", text)
+	}
+	if text := findObjectText(t, mustRender(t, helm, values...), "Ingress"); strings.Contains(text, "backend-protocol") {
+		t.Errorf("without TLS in the pod, the Ingress sets a backend protocol:\n%s", text)
+	}
+
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"another host", []string{"--set", "issuer=https://other.example.org"}, "issuer must be https://spiffex.example.org"},
+		{"another host with TLS in the pod", []string{"--set", "tls.existingSecret=tls", "--set", "issuer=https://other.example.org"}, "issuer must be https://spiffex.example.org"},
+		{"the Service's URL with TLS in the pod", []string{"--set", "tls.existingSecret=tls", "--set", "issuer="}, "^https://"},
+		{"a path on the host", []string{"--set", "issuer=https://spiffex.example.org/spiffex"}, "issuer must be https://spiffex.example.org"},
+		{"plain HTTP", []string{"--set", "issuer=http://spiffex.example.org"}, "^https://"},
+		{"no issuer", []string{"--set", "issuer="}, "^https://"},
+		{"no host", []string{"--set", "ingress.host="}, "ingress.host"},
+		{"a wildcard host", []string{"--set", "ingress.host=*.example.org"}, "ingress.host"},
+	} {
+		if _, err := renderObjects(t, helm, append(slices.Clone(values), c.args...)...); err == nil || !schemaErrorNames(err.Error(), c.want) {
+			t.Errorf("%s: want an error containing %q, got %v", c.name, c.want, err)
+		}
+	}
+}
+
+func mustRender(t *testing.T, helm string, args ...string) []map[string]any {
+	t.Helper()
+	objects, err := renderObjects(t, helm, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return objects
+}
+
+func mustObjects(t *testing.T, helm string, args ...string) []k8sObject {
+	t.Helper()
+	objects, err := helmTemplate(t, helm, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return objects
+}
+
+func findObjectText(t *testing.T, objects []map[string]any, kind string) string {
+	t.Helper()
+	out, err := yaml.Marshal(findObject(objects, kind))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// extraObjects are rendered as given, maps and strings alike, with tpl.
+func TestChartExtraObjects(t *testing.T) {
+	helm := helmPath(t)
+	objects, err := renderObjects(t, helm, "-f", filepath.Join(chartDir, "ci", "ingress-values.yaml"),
+		"--set-json", `extraObjects[1]="apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: {{ include \"spiffex.fullname\" . }}-extra\n"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	es := findObject(objects, "ExternalSecret")
+	if es == nil {
+		t.Fatal("no ExternalSecret rendered")
+	}
+	if md := es["metadata"].(map[string]any); md["name"] != "spiffex-signing-keys" || md["namespace"] != "spiffex" {
+		t.Errorf("the ExternalSecret's metadata is %v; tpl did not run", md)
+	}
+	if !strings.Contains(findObjectText(t, objects, "ExternalSecret"), "target: $1") {
+		t.Error("the ExternalSecret's rewrite target was changed")
+	}
+	extra := false
+	for _, o := range objects {
+		if o["kind"] == "ServiceAccount" && o["metadata"].(map[string]any)["name"] == "spiffex-issuer-extra" {
+			extra = true
+		}
+	}
+	if !extra {
+		t.Error("an extra object given as a string was not rendered through tpl")
+	}
+	// Braces meant for the object itself pass through tpl when escaped, as
+	// the README says.
+	if escaped := find(mustObjects(t, helm, "-f", filepath.Join(chartDir, "ci", "ingress-values.yaml"),
+		"--set-json", `extraObjects[0]={"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "escaped"}, "data": {"template": "{{ \"{{ .password }}\" }}"}}`),
+		"ConfigMap", "escaped"); escaped == nil || escaped.Data["template"] != "{{ .password }}" {
+		t.Errorf("an escaped template rendered as %+v", escaped)
+	}
+
+	// The state ConfigMap takes further annotations and keeps its own: the
+	// keep policy always, and Prune=false,Delete=false added to the sync
+	// options given, without repeating one already there.
+	for _, c := range []struct{ given, want string }{
+		{"", "Prune=false,Delete=false"},
+		{"ServerSideApply=true", "ServerSideApply=true,Prune=false,Delete=false"},
+		{"Delete=false, ServerSideApply=true", "Delete=false,ServerSideApply=true,Prune=false"},
+	} {
+		args := []string{"--set", "trustDomain=example.org", "--set", "signingKeys.existingSecret=keys", "--set", "tls.existingSecret=tls",
+			"--set", "state.configMapAnnotations.helm\\.sh/resource-policy=delete",
+			"--set", "state.configMapAnnotations.argocd\\.argoproj\\.io/compare-options=IgnoreExtraneous"}
+		if c.given != "" {
+			args = append(args, "--set-string", "state.configMapAnnotations.argocd\\.argoproj\\.io/sync-options="+strings.ReplaceAll(c.given, ",", "\\,"))
+		}
+		st := find(mustObjects(t, helm, args...), "ConfigMap", "spiffex-issuer-state")
+		if st == nil || st.Metadata.Annotations["argocd.argoproj.io/compare-options"] != "IgnoreExtraneous" ||
+			st.Metadata.Annotations["argocd.argoproj.io/sync-options"] != c.want ||
+			st.Metadata.Annotations["helm.sh/resource-policy"] != "keep" {
+			t.Errorf("sync options %q: the state ConfigMap's annotations are %+v, want sync options %q", c.given, st, c.want)
+		}
+	}
+}

@@ -169,6 +169,58 @@
         "type": "string"
       }
     },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "className": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "host": {
+          "type": "string",
+          "description": "The host name clients reach the issuer at",
+          "pattern": "^([a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*)?$"
+        },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "secretName": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "then": {
+        "properties": {
+          "host": {
+            "minLength": 1
+          }
+        },
+        "required": [
+          "host"
+        ]
+      }
+    },
     "state": {
       "type": "object",
       "properties": {
@@ -180,6 +232,12 @@
             "object",
             "null"
           ]
+        },
+        "configMapAnnotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false
@@ -392,6 +450,48 @@
       "items": {
         "type": "object"
       }
+    },
+    "extraObjects": {
+      "description": "Further manifests, as maps or strings, each passed through tpl",
+      "type": "array",
+      "items": {
+        "type": [
+          "object",
+          "string"
+        ]
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "description": "With an ingress, clients reach the issuer at https://<ingress.host> (the template checks the host)",
+      "if": {
+        "properties": {
+          "ingress": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "ingress"
+        ]
+      },
+      "then": {
+        "properties": {
+          "issuer": {
+            "pattern": "^https://"
+          }
+        },
+        "required": [
+          "issuer"
+        ]
+      }
+    }
+  ]
 }

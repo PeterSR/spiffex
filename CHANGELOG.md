@@ -7,6 +7,22 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-16
+
+### Added
+
+- The Helm chart can add an Ingress (`ingress`) that routes every path of a host to the issuer, for
+  an issuer reached from outside the cluster. The chart then requires `issuer` to be
+  `https://<ingress.host>`, and with TLS in the pod as well it tells ingress-nginx to speak HTTPS to
+  the issuer. The chart README explains when `trustedProxies` matters (only for exec verifiers'
+  per-address limits), what to list behind an ingress, and what that trusts.
+- `extraObjects` in the Helm chart renders further manifests with the release, through `tpl`, for
+  instance an ExternalSecret that makes the signing key Secret; the chart README has one that takes
+  every parameter under an AWS Parameter Store path.
+- `state.configMapAnnotations` in the Helm chart adds annotations to the state ConfigMap, such as
+  Argo CD's; `Prune=false,Delete=false` is added to any Argo CD sync options given. The chart README describes the safe Argo CD setup for the state: `ignoreDifferences`
+  on its data with `RespectIgnoreDifferences=true`.
+
 ## [0.1.0] - 2026-10-16
 
 The first stable release: everything in 0.1.0-rc.1 below, and:
@@ -76,6 +92,7 @@ The first version: an issuer, an agent and the `spiffex` command, following vers
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
 
-[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.1
 [0.1.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.0
 [0.1.0-rc.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.0-rc.1
