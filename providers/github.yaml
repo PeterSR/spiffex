@@ -1,0 +1,22 @@
+description: >-
+  GitHub Actions workflows of one user or organization, by repository. Set owner_id to the
+  numeric id of the owner (the repository_owner_id claim), never to its name, which can be
+  renamed and taken by someone else. Set refs to the git refs whose workflows are admitted, as
+  GitHub writes them in the ref claim, such as refs/heads/main or refs/tags/v*.
+params:
+  owner_id: { type: string, required: true }
+  refs: { type: list, required: true }
+  repository_ids: { type: list, default: ["*"] }
+  issuer: { type: string, default: https://token.actions.githubusercontent.com }
+proof:
+  jwt:
+    issuer: $issuer
+    discovery: true
+    shared: true
+    owner_claims: [repository_owner_id, repository_id, enterprise_id]
+require: [repository_id]
+match:
+  repository_owner_id: $owner_id
+  repository_id: $repository_ids
+  ref: $refs
+name: "{repository_id}"

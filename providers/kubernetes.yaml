@@ -1,0 +1,16 @@
+description: Pods in the cluster the issuer runs in, by service account.
+params:
+  issuer: { type: string, default: https://kubernetes.default.svc.cluster.local }
+  namespaces: { type: list, default: ["*"] }
+  deny_namespaces: { type: list, default: [kube-system] }
+proof:
+  jwt:
+    issuer: $issuer      # managed clusters (EKS, GKE, AKS) put another URL in their tokens
+    jwks_uri: https://kubernetes.default.svc.cluster.local/openid/v1/jwks
+    ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    shared: false
+require: [kubernetes.io/pod/name]
+match: { kubernetes.io/namespace: $namespaces }
+deny: { kubernetes.io/namespace: $deny_namespaces }
+name: ns/{kubernetes.io/namespace}/sa/{kubernetes.io/serviceaccount/name}

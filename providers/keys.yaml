@@ -1,0 +1,4 @@
+description: Workloads that hold a private key, one member per workload, authenticating with private_key_jwt.
+proof:
+  keys: {}
+name: "{member}"

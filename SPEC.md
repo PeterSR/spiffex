@@ -215,7 +215,7 @@ unless all of the following hold, allowing 30 seconds of clock skew on every tim
 - `exp` is present, in the future, and no more than 5 minutes from now.
 - `iat`, if present, is not in the future; `nbf`, if present, has passed.
 - `jti` is present and the issuer has not accepted it from this client before. The issuer remembers
-  each `jti` until the assertion expires.
+  each `jti` until the assertion expires, plus the clock skew allowance.
 
 Clients SHOULD set the JWS header `typ` to `client-authentication+jwt`. The issuer MUST NOT require
 it.
@@ -236,10 +236,11 @@ understands (section 5.4).
 |---|---|
 | `grant_type` | `urn:ietf:params:oauth:grant-type:token-exchange` |
 | `subject_token` | the proof, at most 16 KiB |
-| `subject_token_type` | `urn:ietf:params:oauth:token-type:jwt` or `urn:ietf:params:oauth:token-type:id_token`, processed identically, for `jwt` origins; `urn:spiffex:token-type:origin:<origin name>` for an `exec` origin; any other value is `invalid_request` |
+| `subject_token_type` | `urn:ietf:params:oauth:token-type:jwt` or `urn:ietf:params:oauth:token-type:id_token`, processed identically, for `jwt` origins; `urn:spiffex:token-type:exec` for an `exec` origin; any other value is `invalid_request` |
+| `origin` | REQUIRED with `urn:spiffex:token-type:exec`, and not allowed otherwise: the name of the `exec` origin; a spiffex extension |
 | `requested_token_type` | OPTIONAL; if present MUST be `urn:ietf:params:oauth:token-type:jwt` |
 
-For an `exec` origin, the subject token type names the origin. If no `exec` origin has that name,
+For an `exec` origin, the `origin` parameter names the origin. If no `exec` origin has that name,
 the request is rejected as an invalid subject token; otherwise the issuer runs the origin's verifier
 (section 5.4), checks its admission (section 4.3) and issues the SPIFFE ID it names.
 
@@ -254,8 +255,9 @@ token names at most one origin. The issuer MUST:
    never from a location named by the token, with an asymmetric algorithm consistent with the key
    (no `none`, no HMAC).
 4. Require `exp` and `iat`, check `exp` and `nbf`, and refuse a token meant to live longer than the
-   origin's `max_token_lifetime` (`exp` minus `iat`, section 5.2), so that a long-lived token minted
-   by hand is not a standing credential.
+   origin's `max_token_lifetime` plus 30 seconds (`exp` minus `iat`, section 5.2), so that a
+   long-lived token minted by hand is not a standing credential. The allowance admits platforms
+   that add a few seconds, as Kubernetes does with its 3607-second tokens.
 5. Check the origin's admission (section 4.3) and issue the SPIFFE ID it names.
 
 ## 4. Origins
@@ -314,7 +316,8 @@ allowed; it is how several machines share one identity, each with its own key.
 
 A `keys` origin lists **members**, keyed by name. A member's name is a segment. Each member has
 `keys`: one to ten public keys, ES256 keys on P-256 or RS256 keys of at least 2048 bits, each given
-as a PEM `PUBLIC KEY` block or as a JWK. A member accepts an assertion signed by any of its keys,
+as a PEM `PUBLIC KEY` block or as a JWK. A JWK that carries private key members (`d`, `p`, `q`,
+`dp`, `dq`, `qi` or `oth`) is refused. A member accepts an assertion signed by any of its keys,
 which is how a workload's key is rotated.
 
 ### 4.3 Admission
@@ -322,9 +325,11 @@ which is how a workload's key is rotated.
 A **claim path** names a claim of the subject token, or for an `exec` origin of the claims its
 verifier returned. It is a `/`-separated list of JSON object
 member names: `sub` is the top-level `sub` claim, and `kubernetes.io/namespace` is the `namespace`
-member of the `kubernetes.io` object. A claim whose own name contains `/` cannot be addressed. A
+member of the `kubernetes.io` object. As in a JSON Pointer ([RFC 6901]), `~1` in a name stands for
+`/` and `~0` for `~`, so `oidc.circleci.com~1project-id` is the top-level claim
+`oidc.circleci.com/project-id`. Any other `~` is an error. A
 claim's **value** is its string value, or an integer exactly as written in the token; any other JSON
-value counts as absent. Claim paths mean the same in `require`, `match`, `deny` and name templates.
+value, and an empty string, count as absent. Claim paths mean the same in `require`, `match`, `deny` and name templates.
 
 A `jwt` or `exec` origin admits a verified proof when:
 
@@ -348,7 +353,7 @@ A `keys` origin admits a member whose assertion is valid (section 3.2). It has n
 ### 4.4 Audience restriction
 
 An origin MAY list, as `audiences`, the audiences its identities may request, as patterns in the
-sense of section 4.3; the provider MAY set a default. When a list is in effect, the token endpoint
+sense of section 4.3; the provider MAY set a default, which an origin's own list replaces. When a list is in effect, the token endpoint
 refuses any other audience with `invalid_target`. This is a convenience for the operator; receivers
 still check `aud` themselves (section 10). The management endpoint is allowed only when the list
 matches it.
@@ -398,7 +403,9 @@ Substitution is one pass over the provider document, before anything else reads 
   again.
 - There is no other templating: no conditionals, no loops, no concatenation.
 
-Parameter names follow the rules for origin names. An origin that omits a required parameter, sets
+Parameter names are 1 to 63 characters from `a-z 0-9 _ -`, starting with a letter. A whole value
+`$<name>` naming a parameter the provider does not declare, or appearing in a field that cannot take
+a parameter, is an error, not literal text. An origin that omits a required parameter, sets
 one the provider does not declare, or gives one of the wrong type MUST be refused.
 
 Only these fields may take a parameter: `issuer`, `audience`, `jwks_uri`, `owner_claims` (of a
@@ -469,7 +476,7 @@ and `exec` proofs alike:
   | `https://token.actions.githubusercontent.com/...` (GitHub, and GitHub Enterprise under it) | `repository_owner_id`, `repository_id`, `enterprise_id` |
   | `https://gitlab.com` | `namespace_id`, `project_id` |
   | `https://accounts.google.com`, `accounts.google.com` | `sub` |
-  | `https://oidc.circleci.com/org/...` | `oidc.circleci.com/project-id` |
+  | `https://oidc.circleci.com/org/...` | `oidc.circleci.com~1project-id` |
   | `https://login.microsoftonline.com/...`, `https://sts.windows.net/...` | `tid`, `oid` |
   | `https://app.terraform.io` | `terraform_organization_id` |
 
@@ -505,7 +512,9 @@ so binding the proof to its origin is the verifier's job (below).
 can install one. The issuer's own settings, outside the state, list the allowed verifiers as
 complete argument vectors, and a provider's `command` MUST equal one of them exactly, compared as
 strings, without resolving symbolic links. The list is empty by default. A state writer can choose
-among the verifiers the operator installed, never add one or change their arguments.
+among the verifiers the operator installed, never add one or change their arguments. Because a
+verifier runs with the issuer's network access and credentials, creating or changing an `exec`
+origin through the management API requires `write` on `/` (section 8.3).
 
 **Running it.** For each request, the issuer:
 
@@ -529,7 +538,8 @@ among the verifiers the operator installed, never add one or change their argume
 
    `audience` is the origin audience (section 5.2). `params` holds every parameter of the
    provider, with the origin's values or the defaults, strings as strings and lists as arrays of
-   strings. Parameters reach the verifier only this way, as data;
+   strings. Parameters reach the verifier only this way, as data, and a verifier MUST treat them as
+   untrusted input: they come from the state, not from the operator who installed it;
 4. reads its standard output, and kills the whole process group when the timeout passes;
 5. accepts the proof only if the verifier exits with status 0 within the timeout, its standard
    output is at most 64 KiB, and that output is exactly one JSON object with a `claims` member that
@@ -547,9 +557,9 @@ signed header, a signed field, an audience claim). Without that, a proof made fo
 or for another origin using the same verifier, could be replayed here. A verifier is also
 responsible for refusing proofs that are stale or replayed, since only it understands them.
 
-**Limits.** The issuer MUST bound the number of verifiers running at once for each origin, and
-answer `server_error` when an origin's bound is reached, so one origin cannot starve another. It
-SHOULD limit the rate at which one client address can start verifiers.
+**Limits.** The issuer MUST bound the number of verifiers running at once, both for each origin and
+in total, and answer `server_error` when a bound is reached, so one origin cannot starve another.
+It MUST also limit the rate at which one client address can start verifiers.
 
 Validation never runs a verifier.
 
@@ -560,11 +570,12 @@ The `kubernetes` provider, as an implementation might ship it:
 ```yaml
 description: Pods in the cluster the issuer runs in, by service account.
 params:
+  issuer: { type: string, default: https://kubernetes.default.svc.cluster.local }
   namespaces: { type: list, default: ["*"] }
   deny_namespaces: { type: list, default: [kube-system] }
 proof:
   jwt:
-    issuer: https://kubernetes.default.svc.cluster.local
+    issuer: $issuer      # managed clusters (EKS, GKE, AKS) put another URL in their tokens
     jwks_uri: https://kubernetes.default.svc.cluster.local/openid/v1/jwks
     ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
     bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
@@ -682,11 +693,12 @@ Every request carries `Authorization: Bearer <JWT-SVID>`. The issuer MUST accept
 - `aud` is exactly the management endpoint URL `<issuer>/manage`, as a string or one-element array;
 - `exp` has not passed, and `exp` minus `iat` is at most five minutes;
 - the caller, the token's `sub`, is still issuable: its path is within the prefix of an origin and,
-  when that is a `keys` origin, some member of it is named that way.
+  when that is a `keys` origin, filling its name template for some current member gives the
+  caller's SPIFFE ID.
 
 Once the issuer has taken up the change (section 8.3), the last rule makes removing an origin or
 member revoke its management access, rather than waiting for its tokens to expire. For a `jwt`
-origin the check looks only at the prefix: narrowing its admission does not revoke a token already
+or `exec` origin the check looks only at the prefix: narrowing its admission does not revoke a token already
 issued.
 
 Callers obtain these tokens like any other, by requesting the audience `<issuer>/manage`, alone,
@@ -704,7 +716,7 @@ A **grant** has a name, and:
 | Field | |
 |---|---|
 | `who` | a SPIFFE ID pattern (below) |
-| `can` | one or more of `read`, `write`, `grants` |
+| `can` | one or more of `read`, `write`, `delegate` |
 | `on` | one or more **scopes**: paths in the sense of an origin prefix (section 4.1); `/` is everything |
 
 A **SPIFFE ID pattern** is a SPIFFE ID in the trust domain whose path segments may be `*`, matching
@@ -713,9 +725,9 @@ prefix** is the path before its first `*` or `**` segment.
 
 | Permission | Allows, within the scope |
 |---|---|
-| `read` | reading origins (with their members) and grants |
+| `read` | reading origins (with their members) and grants; `write` and `delegate` imply it |
 | `write` | creating, changing and removing origins and their members; with scope `/`, also providers |
-| `grants` | creating, changing and removing grants, subject to the rules below |
+| `delegate` | creating, changing and removing grants, subject to the rules below |
 
 A path is **within** a scope when it equals the scope or extends it by whole segments. An origin is
 within a scope when its prefix is, and a grant is when each of its scopes is. A caller **holds** a
@@ -726,7 +738,7 @@ the path is within. Permissions are evaluated against the current state on every
 anyone into it, so the caller can take on any SPIFFE ID under `/vms`. The rules below follow from
 that, and from the prefix rule of section 4.1.
 
-- **No escalation.** To create, change or remove a grant, the caller MUST hold `grants` on each of
+- **No escalation.** To create, change or remove a grant, the caller MUST hold `delegate` on each of
   the grant's scopes, and MUST hold every permission the grant gives, in its old and its new form,
   on each of its scopes.
 - **Closure.** The set of grants MUST be closed: whenever a grant A gives `write` on a scope S, and
@@ -738,8 +750,11 @@ that, and from the prefix rule of section 4.1.
 Closure is decided exactly as follows, so every implementation reaches the same answer. For every
 pair of grants A and B (A and B may be the same grant) where A gives `write` on a scope S and S
 **reaches** B's `who`, then for every permission p B gives and every scope s of B, there MUST be a
-single grant G whose `who` **covers** A's `who`, whose `can` includes p, and one of whose scopes s
-is within. Permissions spread over several grants do not count.
+single grant G whose `who` **covers** A's `who`, which gives p (`write` and `delegate` give `read`
+too), and one of whose scopes s
+is within. G may be a different grant for each pair (p, s), but for any one pair a single grant's
+`who` must cover A's `who` by itself: several grants whose patterns only together cover it do not
+count.
 
 Both relations compare the segments of the paths, with `*` and `**` as in a SPIFFE ID pattern:
 
@@ -765,7 +780,7 @@ Request bodies MUST NOT exceed 1 MiB.
 |---|---|
 | `GET /manage/state` | none; returns the providers, and the origins and grants the caller may read |
 | `GET /manage/origins/{name}` | `read` on the origin's prefix |
-| `PUT /manage/origins/{name}` | `write` on the old and the new prefix; `write` on `/` when the expanded origin's audience is not its origin audience (section 5.2) |
+| `PUT /manage/origins/{name}` | `write` on the old and the new prefix; `write` on `/` when the expanded origin's audience is not its origin audience (section 5.2), or when it is an `exec` origin (section 5.4) |
 | `DELETE /manage/origins/{name}` | `write` on the origin's prefix |
 | `PUT /manage/origins/{name}/members/{member}` | `write` on the origin's prefix; body `{"keys": [...]}` as in section 4.2; `422` on a `jwt` origin |
 | `DELETE /manage/origins/{name}/members/{member}` | `write` on the origin's prefix |
@@ -839,7 +854,7 @@ An agent supports both grants of section 3 and is configured to use one. For tok
 obtains the subject token for each request either by reading a file, which platforms such as
 Kubernetes rotate in place, or by running a configured command without a shell and taking its
 standard output, for proofs that must be made fresh (a signed cloud API request, for one). It sends
-the subject token type its configuration names. It SHOULD reuse a JWT-SVID
+the subject token type its configuration names and, for an `exec` origin, the origin's name. It SHOULD reuse a JWT-SVID
 for the same audiences until half its lifetime has passed, and SHOULD refresh the bundle at the
 issuer's `spiffe_refresh_hint`.
 
@@ -901,6 +916,7 @@ on the provider; requesting that single audience is RECOMMENDED. Trust policies 
 [Workload API]: https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md
 [RFC 2119]: https://www.rfc-editor.org/rfc/rfc2119
 [RFC 6749]: https://www.rfc-editor.org/rfc/rfc6749
+[RFC 6901]: https://www.rfc-editor.org/rfc/rfc6901
 [RFC 7517]: https://www.rfc-editor.org/rfc/rfc7517
 [RFC 7523]: https://www.rfc-editor.org/rfc/rfc7523
 [RFC 7523bis]: https://datatracker.ietf.org/doc/draft-ietf-oauth-rfc7523bis/

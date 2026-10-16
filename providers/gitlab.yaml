@@ -1,0 +1,23 @@
+description: >-
+  GitLab CI/CD jobs of one group or user namespace, by project. Set namespace_id to the numeric
+  id of the namespace, never to its path, which can be renamed and taken by someone else. It pins
+  exactly that namespace: projects in its subgroups have their own namespace ids and are not
+  admitted. Set refs to the branches or tags whose jobs are admitted, as GitLab writes them in the
+  ref claim, such as main or v*. For a self-managed instance, set issuer to its URL.
+params:
+  namespace_id: { type: string, required: true }
+  refs: { type: list, required: true }
+  project_ids: { type: list, default: ["*"] }
+  issuer: { type: string, default: https://gitlab.com }
+proof:
+  jwt:
+    issuer: $issuer
+    discovery: true
+    shared: true
+    owner_claims: [namespace_id, project_id]
+require: [project_id]
+match:
+  namespace_id: $namespace_id
+  project_id: $project_ids
+  ref: $refs
+name: "{project_id}"

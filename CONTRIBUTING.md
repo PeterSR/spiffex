@@ -10,6 +10,8 @@ specification. Contributions that keep it that way are the most welcome kind.
 | [SPEC.md](SPEC.md) | the specification; as much the product as the code |
 | `cmd/spiffex/` | the `spiffex` command: issuer, agent, keys, a local dev setup |
 | `internal/` | the implementation, one package per concern |
+| `providers/` | the providers spiffex ships with, as plain provider documents |
+| `schema/` | the JSON Schemas of the state document, a provider and an origin |
 | `conformance/` | the interoperability matrix against stock SPIFFE and OIDC libraries |
 | `docs/` | configuration, operations and Kubernetes |
 | `deploy/kubernetes/` | example manifests for the issuer and a workload |

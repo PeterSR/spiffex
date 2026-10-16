@@ -1,0 +1,12 @@
+description: A verifier for signed requests from one cloud account.
+params:
+  account: { type: string, required: true }
+proof:
+  exec:
+    command: [/usr/local/libexec/spiffex/verify-cloud, --strict]
+    timeout: 10s
+    shared: true
+    owner_claims: [account]
+match:
+  account: $account
+name: "{role}"

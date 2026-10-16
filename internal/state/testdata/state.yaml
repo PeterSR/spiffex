@@ -1,0 +1,51 @@
+# A state with one origin of each shipped kind, a provider of its own and
+# grants that satisfy the closure rule.
+origins:
+  kube:
+    provider: kubernetes
+    with:
+      namespaces: [customer-*, platform]
+  ci:
+    provider: github
+    with:
+      owner_id: "4711"
+      refs: [refs/heads/main]
+    audiences: [https://deploy.example.org]
+  partner:
+    provider: partner-idp
+    with:
+      customer: acme
+  vms:
+    provider: keys
+    members:
+      billing:
+        keys:
+          - |
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEnd45sNuM/wRnRc2N/7R/hHUjiII7
+            gIUSkE3EedKVLe83/LOj9cJ7x5hCwMKvXFAp6Q0P3PVhG/D/MsRZdAQzXQ==
+            -----END PUBLIC KEY-----
+providers:
+  partner-idp:
+    description: The identity provider of a partner, for its batch jobs.
+    params:
+      customer: { type: string, required: true }
+    proof:
+      jwt:
+        issuer: https://idp.partner.example
+        jwks_uri: https://idp.partner.example/keys
+        shared: false
+        max_token_lifetime: 15m
+    require: [sub]
+    match:
+      customer: $customer
+    name: "{sub}"
+grants:
+  operators:
+    who: spiffe://example.org/vms/billing
+    can: [read, write, delegate]
+    on: [/]
+  ci-deploys:
+    who: spiffe://example.org/ci/*
+    can: [read, write]
+    on: [/partner]

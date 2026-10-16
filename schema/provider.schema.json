@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PeterSR/spiffex/schema/provider.schema.json",
+  "title": "spiffex provider",
+  "description": "A reusable description of a kind of origin (SPEC section 5).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["proof"],
+  "properties": {
+    "description": { "type": "string" },
+    "overrides": {
+      "description": "True when the provider takes the place of a shipped one of the same name.",
+      "type": "boolean"
+    },
+    "params": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_-]{0,62}$" },
+      "additionalProperties": { "$ref": "#/$defs/param" }
+    },
+    "proof": { "$ref": "#/$defs/proof" },
+    "require": { "$ref": "#/$defs/claimPaths" },
+    "match": { "$ref": "#/$defs/conditions" },
+    "deny": { "$ref": "#/$defs/conditions" },
+    "name": {
+      "description": "The default name template.",
+      "type": "string"
+    },
+    "audiences": { "$ref": "#/$defs/patterns" }
+  },
+  "$defs": {
+    "param": {
+      "description": "A parameter, with either required: true or a default.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["string", "list"] },
+        "required": { "const": true },
+        "default": {
+          "type": ["string", "array"],
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "proof": {
+      "description": "Exactly one of jwt, keys and exec.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "jwt": { "$ref": "#/$defs/jwt" },
+        "keys": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "exec": { "$ref": "#/$defs/exec" }
+      }
+    },
+    "exec": {
+      "description": "A local verifier that turns the subject token into claims (SPEC section 5.4). Every field is literal.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "shared"],
+      "properties": {
+        "command": {
+          "description": "An absolute path followed by fixed arguments.",
+          "type": "array",
+          "minItems": 1,
+          "prefixItems": [{ "type": "string", "pattern": "^/" }],
+          "items": { "type": "string" }
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[smh]$"
+        },
+        "shared": { "type": "boolean" },
+        "owner_claims": { "$ref": "#/$defs/claimPaths" }
+      }
+    },
+    "jwt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "shared"],
+      "properties": {
+        "issuer": { "type": "string", "minLength": 1 },
+        "audience": { "type": "string", "minLength": 1 },
+        "jwks": { "$ref": "#/$defs/jwks" },
+        "jwks_uri": { "type": "string", "minLength": 1 },
+        "jwks_file": { "type": "string", "minLength": 1 },
+        "discovery": { "type": "boolean" },
+        "ca_file": { "type": "string", "minLength": 1 },
+        "bearer_token_file": { "type": "string", "minLength": 1 },
+        "shared": { "type": "boolean" },
+        "owner_claims": {
+          "description": "A list of claim paths, or a parameter of type list.",
+          "type": ["array", "string"],
+          "pattern": "^\\$[a-z][a-z0-9_-]{0,62}$",
+          "items": { "$ref": "#/$defs/claimPath" }
+        },
+        "max_token_lifetime": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[smh]$"
+        }
+      }
+    },
+    "jwks": {
+      "type": "object",
+      "required": ["keys"],
+      "properties": {
+        "keys": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "required": ["kty"]
+          }
+        }
+      }
+    },
+    "claimPath": {
+      "type": "string",
+      "pattern": "^(?:[^/~]|~[01])+(?:/(?:[^/~]|~[01])+)*$"
+    },
+    "claimPaths": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/claimPath" }
+    },
+    "patterns": {
+      "description": "A pattern or a list of patterns; * stands for any run of characters.",
+      "type": ["string", "array"],
+      "minLength": 1,
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "conditions": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/claimPath" },
+      "additionalProperties": { "$ref": "#/$defs/patterns" }
+    }
+  }
+}

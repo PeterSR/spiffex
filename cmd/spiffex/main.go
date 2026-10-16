@@ -30,6 +30,9 @@ var commands = []command{
 	{"token", "fetch a JWT-SVID from the issuer and print it", runToken},
 	{"health", "check that an agent is serving, for container probes", runHealth},
 	{"key", "generate and manage keys", runKey},
+	{"check", "validate a state document, a provider or an origin", runCheck},
+	{"provider", "list the shipped providers and print them", runProvider},
+	{"explain", "explain how the state treats a subject token", runExplain},
 	{"dev", "set up a local trust domain to try spiffex with", runDev},
 	{"version", "print the version", runVersion},
 }
@@ -113,14 +116,24 @@ func newFlagSet(name, synopsis string) *flag.FlagSet {
 // parseFlags parses args, then fills every flag not given on the command line
 // from its environment variable.
 func parseFlags(fs *flag.FlagSet, args []string) error {
+	rest, err := parseFlagsAndArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) > 0 {
+		return usageError{fmt.Errorf("unexpected argument %q", rest[0])}
+	}
+	return nil
+}
+
+// parseFlagsAndArgs is parseFlags for commands that take arguments after
+// their flags, which it returns.
+func parseFlagsAndArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return err
+			return nil, err
 		}
-		return usageError{err}
-	}
-	if fs.NArg() > 0 {
-		return usageError{fmt.Errorf("unexpected argument %q", fs.Arg(0))}
+		return nil, usageError{err}
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
@@ -136,7 +149,7 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 			}
 		}
 	})
-	return err
+	return fs.Args(), err
 }
 
 func newLogger(level string) (*slog.Logger, error) {

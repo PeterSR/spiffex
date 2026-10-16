@@ -1,0 +1,6 @@
+provider: kubernetes
+with:
+  namespaces: [customer-*]
+  deny_namespaces: [kube-system, customer-internal]
+prefix: /k8s/prod
+require: [kubernetes.io/serviceaccount/uid]

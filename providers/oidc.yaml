@@ -1,0 +1,14 @@
+description: >-
+  Any OpenID Connect issuer that hands out tokens to anyone, such as a public cloud or CI
+  provider. Because it is shared, every origin using it must add a match entry with exact
+  patterns on one of owner_claims. An upstream that is not shared needs its own provider.
+params:
+  issuer: { type: string, required: true }
+  owner_claims: { type: list, required: true }
+proof:
+  jwt:
+    issuer: $issuer
+    discovery: true
+    shared: true
+    owner_claims: $owner_claims
+name: "{sub}"

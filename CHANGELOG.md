@@ -25,6 +25,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   running.
 - Example Kubernetes manifests, with the agent as a native sidecar started behind a `spiffex health`
   probe, and an end-to-end test on kind.
+- The state model: origins, providers and grants in one document, with the shipped `keys`,
+  `kubernetes`, `github`, `gitlab` and `oidc` providers as plain provider documents, JSON Schemas
+  for the state, a provider and an origin, and full offline validation, the grant closure rule
+  included. `spiffex check` validates a state, a provider or an origin, `spiffex provider` lists
+  and prints the shipped providers, and `spiffex explain` shows how the state would treat a subject
+  token.
 - A conformance matrix: tokens from stock go-spiffe, py-spiffe and plain OAuth 2.0 clients verify
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
