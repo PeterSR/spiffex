@@ -198,7 +198,7 @@ func TestChartDetails(t *testing.T) {
 		{"no signing keys", []string{"--set", "trustDomain=example.org", "--set", "tls.existingSecret=tls"}, "signingKeys.existingSecret is required"},
 		{"no trust domain", []string{"--set", "signingKeys.existingSecret=keys", "--set", "tls.existingSecret=tls"}, "trustDomain is required"},
 		{"no TLS and no issuer", []string{"--set", "trustDomain=example.org", "--set", "signingKeys.existingSecret=keys"}, "issuer is required without TLS"},
-		{"an unknown value", append(slices.Clone(base), "--set", "replica=3"), "Additional property replica is not allowed"},
+		{"an unknown value", append(slices.Clone(base), "--set", "replica=3"), "replica"},
 		{"cert-manager without an issuer", append(slices.Clone(base[:4]), "--set", "tls.certManager.enabled=true"), "tls.certManager.issuerRef.name is required"},
 		{"a bad digest", append(slices.Clone(base), "--set", "image.digest=latest"), "image.digest"},
 		{"a readable file among the keys", append(slices.Clone(base), "--set", "readableFiles={/keys/k.pem}"), "readableFiles.0"},
@@ -207,7 +207,7 @@ func TestChartDetails(t *testing.T) {
 		{"a relative verifier", append(slices.Clone(base), "--set", "verifiers[0]={verifier}"), "verifiers.0.0"},
 		{"an upper-case trust domain", append(slices.Clone(base[2:]), "--set", "trustDomain=Example.org"), "trustDomain"},
 	} {
-		if _, err := helmTemplate(t, helm, c.args...); err == nil || !strings.Contains(err.Error(), c.want) {
+		if _, err := helmTemplate(t, helm, c.args...); err == nil || !schemaErrorNames(err.Error(), c.want) {
 			t.Errorf("%s: want an error containing %q, got %v", c.name, c.want, err)
 		}
 	}
@@ -248,4 +248,11 @@ func TestChartRendering(t *testing.T) {
 			t.Errorf("%s: renders TLS flags or a PodDisruptionBudget", values)
 		}
 	}
+}
+
+// schemaErrorNames reports whether a Helm error names the value at path.
+// Helm releases word schema errors differently: older ones name the value
+// as image.digest, newer ones as the JSON pointer /image/digest.
+func schemaErrorNames(msg, path string) bool {
+	return strings.Contains(msg, path) || strings.Contains(msg, "/"+strings.ReplaceAll(path, ".", "/"))
 }
