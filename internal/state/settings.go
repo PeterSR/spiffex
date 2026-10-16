@@ -34,15 +34,23 @@ type BearerTokenFile struct {
 	// Hosts are compared with the host of the URL keys are fetched from,
 	// port included, ignoring case.
 	Hosts []string
+	// Paths, when set, are the only URL paths the token may be sent to,
+	// compared exactly.
+	Paths []string
 }
 
 // The in-cluster service account files that the shipped kubernetes provider
-// needs, and the API server host its token may go to.
+// needs, and the API server host and paths its token may go to.
 const (
 	ServiceAccountCAFile    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	ServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	InClusterAPIHost        = "kubernetes.default.svc.cluster.local"
 )
+
+// InClusterAPIPaths are the paths of the API server where the service
+// account token may fetch keys: the cluster's JWK Set and its discovery
+// document.
+var InClusterAPIPaths = []string{"/openid/v1/jwks", "/.well-known/openid-configuration"}
 
 // DefaultSettings allows exactly the files the shipped kubernetes provider
 // needs, and nothing else (SPEC section 5.2).
@@ -51,7 +59,7 @@ func DefaultSettings(issuer string, td spiffeid.TrustDomain) Settings {
 		Issuer:           issuer,
 		TrustDomain:      td,
 		ReadableFiles:    []string{ServiceAccountCAFile},
-		BearerTokenFiles: []BearerTokenFile{{Path: ServiceAccountTokenFile, Hosts: []string{InClusterAPIHost}}},
+		BearerTokenFiles: []BearerTokenFile{{Path: ServiceAccountTokenFile, Hosts: []string{InClusterAPIHost}, Paths: slices.Clone(InClusterAPIPaths)}},
 	}
 }
 
@@ -72,7 +80,12 @@ func (s Settings) Check() error {
 
 // ManagementEndpoint is the URL of the management API, and the audience of
 // management tokens (SPEC section 8.1).
-func (s Settings) ManagementEndpoint() string { return s.Issuer + "/manage" }
+func (s Settings) ManagementEndpoint() string { return ManagementAudience(s.Issuer) }
+
+// ManagementAudience is the audience of management tokens for an issuer
+// URL: the management endpoint, which tokens must name byte for byte (SPEC
+// section 8.1).
+func ManagementAudience(issuer string) string { return issuer + "/manage" }
 
 func (s Settings) readable(path string) bool {
 	for _, f := range s.ReadableFiles {

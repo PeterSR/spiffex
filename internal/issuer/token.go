@@ -1,7 +1,6 @@
 package issuer
 
 import (
-	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -12,8 +11,8 @@ import (
 	"math"
 	"mime"
 	"net/http"
+	"net/netip"
 	"net/url"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +23,9 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
 	"github.com/PeterSR/spiffex/internal/exchange"
+	"github.com/PeterSR/spiffex/internal/policy"
+	"github.com/PeterSR/spiffex/internal/state"
+	"github.com/PeterSR/spiffex/internal/verifier"
 )
 
 // OAuth 2.0 identifiers used on the token endpoint.
@@ -33,6 +35,9 @@ const (
 	ClientAssertionJWT     = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 	TokenTypeJWT           = "urn:ietf:params:oauth:token-type:jwt"
 	TokenTypeIDToken       = "urn:ietf:params:oauth:token-type:id_token"
+	// TokenTypeExec marks a proof for an exec origin, named by the origin
+	// parameter (SPEC section 3.3).
+	TokenTypeExec = "urn:spiffex:token-type:exec"
 )
 
 const (
@@ -47,32 +52,15 @@ const (
 	clockSkew = 30 * time.Second
 	// maxRequestBody bounds the token endpoint's form body.
 	maxRequestBody = 64 << 10
+	// maxSubjectToken bounds a subject token (SPEC section 3.3).
+	maxSubjectToken = 16 << 10
+	// maxManagementTokenTTL is the longest a token for the management
+	// endpoint may live (SPEC section 7).
+	maxManagementTokenTTL = 5 * time.Minute
 )
 
 // assertionAlgorithms are the algorithms accepted on client assertions.
 var assertionAlgorithms = []jose.SignatureAlgorithm{jose.ES256, jose.RS256}
-
-// Client is a workload registered for private_key_jwt authentication.
-type Client struct {
-	ID         string
-	SPIFFEID   spiffeid.ID
-	PublicKeys []crypto.PublicKey
-	// Audiences, when non-empty, is the only audiences the client may request.
-	Audiences []string
-}
-
-// Exchanger verifies subject tokens for the token exchange grant and maps
-// them to SPIFFE IDs. An error wrapping exchange.ErrRejected means the token
-// is not acceptable.
-type Exchanger interface {
-	Exchange(ctx context.Context, subjectToken string) (spiffeid.ID, error)
-}
-
-// ClientSource looks up registered clients. It is consulted on every request,
-// so an implementation can swap registrations at runtime.
-type ClientSource interface {
-	Client(id string) (Client, bool)
-}
 
 // ValidateAudience reports whether s is acceptable as one audience value.
 func ValidateAudience(s string) error {
@@ -104,6 +92,11 @@ func errInvalidRequest(format string, args ...any) *oauthError {
 // the response does not tell an unknown client from a bad signature.
 var errClientAuth = &oauthError{http.StatusUnauthorized, "invalid_client", "client authentication failed"}
 
+// errSubjectToken is the one answer to every refused subject token, so the
+// response does not tell a token no origin takes from one its origin
+// refuses.
+var errSubjectToken = errInvalidRequest("subject token rejected")
+
 var errInvalidTarget = &oauthError{http.StatusBadRequest, "invalid_target", "audience not permitted"}
 
 type tokenResponse struct {
@@ -114,9 +107,17 @@ type tokenResponse struct {
 	SPIFFEID        string `json:"spiffe_id"`
 }
 
+// grant is what an authenticated token request gets: an identity, from an
+// origin, for audiences.
+type grant struct {
+	id        spiffeid.ID
+	origin    *policy.Origin
+	audiences []string
+}
+
 func (iss *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
-	id, audiences, err := iss.authorizeTokenRequest(r)
+	g, err := iss.authorizeTokenRequest(r)
 	if err != nil {
 		var oe *oauthError
 		if !errors.As(err, &oe) {
@@ -128,106 +129,222 @@ func (iss *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, oe.status, oe, "no-store")
 		return
 	}
-	token, expires, err := iss.Mint(id, audiences)
+	token, expires, err := iss.Mint(g.id, g.audiences)
 	if err != nil {
-		iss.cfg.Logger.Error("minting a JWT-SVID failed", "spiffe_id", id, "error", err)
+		iss.cfg.Logger.Error("minting a JWT-SVID failed", "spiffe_id", g.id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, &oauthError{Code: "server_error"}, "no-store")
 		return
 	}
-	iss.cfg.Logger.Info("issued JWT-SVID", "spiffe_id", id, "audience", audiences)
+	iss.cfg.Logger.Info("issued JWT-SVID", "spiffe_id", g.id, "origin", g.origin.Name, "audience", g.audiences)
 	w.Header().Set("Pragma", "no-cache")
 	writeJSON(w, http.StatusOK, tokenResponse{
 		AccessToken:     token,
 		IssuedTokenType: TokenTypeJWT,
 		TokenType:       "Bearer",
 		ExpiresIn:       int(math.Ceil(expires.Sub(iss.cfg.Now()).Seconds())),
-		SPIFFEID:        id.String(),
+		SPIFFEID:        g.id.String(),
 	}, "no-store")
 }
 
-// authorizeTokenRequest authenticates the caller and returns the identity and
-// audiences to mint for.
-func (iss *Issuer) authorizeTokenRequest(r *http.Request) (spiffeid.ID, []string, error) {
+// authorizeTokenRequest authenticates the caller, then checks the audiences
+// it asks for. Audiences are checked only after authentication, so that a
+// refused audience tells nothing to someone who could not authenticate
+// (SPEC section 3.1).
+func (iss *Issuer) authorizeTokenRequest(r *http.Request) (*grant, error) {
 	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct != "application/x-www-form-urlencoded" {
-		return spiffeid.ID{}, nil, errInvalidRequest("content type must be application/x-www-form-urlencoded")
+		return nil, errInvalidRequest("content type must be application/x-www-form-urlencoded")
 	}
 	if err := r.ParseForm(); err != nil {
-		return spiffeid.ID{}, nil, errInvalidRequest("malformed request body")
+		return nil, errInvalidRequest("malformed request body")
 	}
 	form := r.PostForm
 	if err := singleValued(form); err != nil {
-		return spiffeid.ID{}, nil, err
+		return nil, err
 	}
 	if form.Has("actor_token") {
-		return spiffeid.ID{}, nil, errInvalidRequest("actor_token is not supported")
+		return nil, errInvalidRequest("actor_token is not supported")
 	}
 	if len(form["audience"]) == 0 {
-		return spiffeid.ID{}, nil, errInvalidRequest("audience is required")
+		return nil, errInvalidRequest("audience is required")
 	}
 
-	switch grant := form.Get("grant_type"); grant {
+	// One view for the whole request, so a reload halfway cannot mix two
+	// versions of the state.
+	view := iss.cfg.Policy.Current()
+	var g *grant
+	var err error
+	switch grantType := form.Get("grant_type"); grantType {
 	case GrantClientCredentials:
-		if iss.cfg.Clients == nil {
-			return spiffeid.ID{}, nil, &oauthError{http.StatusBadRequest, "unsupported_grant_type", ""}
-		}
-		client, err := iss.authenticateClient(form)
-		if err != nil {
-			return spiffeid.ID{}, nil, err
-		}
-		audiences, err := iss.checkAudiences(form["audience"])
-		if err != nil {
-			return spiffeid.ID{}, nil, err
-		}
-		if err := checkAudienceAllowed(audiences, client.Audiences); err != nil {
-			return spiffeid.ID{}, nil, err
-		}
-		return client.SPIFFEID, audiences, nil
+		g, err = iss.authenticateClient(view, form)
 	case GrantTokenExchange:
-		if iss.cfg.Exchanger == nil {
-			return spiffeid.ID{}, nil, &oauthError{http.StatusBadRequest, "unsupported_grant_type", ""}
-		}
-		id, err := iss.exchange(r, form)
-		if err != nil {
-			return spiffeid.ID{}, nil, err
-		}
-		audiences, err := iss.checkAudiences(form["audience"])
-		if err != nil {
-			return spiffeid.ID{}, nil, err
-		}
-		return id, audiences, nil
+		g, err = iss.exchange(r, view, form)
 	case "":
-		return spiffeid.ID{}, nil, errInvalidRequest("grant_type is required")
+		return nil, errInvalidRequest("grant_type is required")
 	default:
-		return spiffeid.ID{}, nil, &oauthError{http.StatusBadRequest, "unsupported_grant_type", ""}
+		return nil, &oauthError{http.StatusBadRequest, "unsupported_grant_type", ""}
 	}
+	if err != nil {
+		return nil, err
+	}
+	if g.audiences, err = iss.checkAudiences(form["audience"]); err != nil {
+		return nil, err
+	}
+	for _, aud := range g.audiences {
+		if !g.origin.AllowsAudience(aud) {
+			return nil, errInvalidTarget
+		}
+	}
+	return g, nil
 }
 
 // exchange verifies an RFC 8693 subject token (SPEC section 3.3).
-func (iss *Issuer) exchange(r *http.Request, form url.Values) (spiffeid.ID, error) {
-	switch form.Get("subject_token_type") {
-	case TokenTypeJWT, TokenTypeIDToken:
-	default:
-		return spiffeid.ID{}, errInvalidRequest("subject_token_type must be %s or %s", TokenTypeJWT, TokenTypeIDToken)
-	}
+func (iss *Issuer) exchange(r *http.Request, view *policy.View, form url.Values) (*grant, error) {
 	if rt := form.Get("requested_token_type"); rt != "" && rt != TokenTypeJWT {
-		return spiffeid.ID{}, errInvalidRequest("requested_token_type must be %s", TokenTypeJWT)
+		return nil, errInvalidRequest("requested_token_type must be %s", TokenTypeJWT)
 	}
 	token := form.Get("subject_token")
 	if token == "" {
-		return spiffeid.ID{}, errInvalidRequest("subject_token is required")
+		return nil, errInvalidRequest("subject_token is required")
 	}
-	id, err := iss.cfg.Exchanger.Exchange(r.Context(), token)
-	if errors.Is(err, exchange.ErrRejected) {
-		// The reason stays in the log; the caller learns only that it failed.
-		if iss.rejectLog.allow(iss.cfg.Now()) {
-			iss.cfg.Logger.Info("subject token rejected", "reason", err)
+	if len(token) > maxSubjectToken {
+		return nil, errInvalidRequest("subject_token is larger than %d bytes", maxSubjectToken)
+	}
+	var g *grant
+	var err error
+	switch tokenType := form.Get("subject_token_type"); tokenType {
+	case TokenTypeJWT, TokenTypeIDToken:
+		if form.Has("origin") {
+			return nil, errInvalidRequest("origin goes only with subject_token_type %s", TokenTypeExec)
 		}
-		return spiffeid.ID{}, errInvalidRequest("subject token rejected")
+		g, err = iss.exchangeJWT(r, view, token)
+	case TokenTypeExec:
+		name := form.Get("origin")
+		if name == "" {
+			return nil, errInvalidRequest("origin is required with subject_token_type %s", TokenTypeExec)
+		}
+		g, err = iss.exchangeExec(r, view, name, token)
+	default:
+		return nil, errInvalidRequest("subject_token_type must be %s, %s or %s", TokenTypeJWT, TokenTypeIDToken, TokenTypeExec)
+	}
+	// The reasons go to the log; the caller learns only that it failed.
+	var refused *state.RefusedError
+	switch {
+	case errors.As(err, &refused):
+		iss.logRejection("the origin does not admit the subject token", "origin", g.origin.Name, "reason", refused.LogDetail())
+		return nil, errSubjectToken
+	case errors.Is(err, exchange.ErrRejected), errors.Is(err, verifier.ErrRejected):
+		attrs := []any{"reason", err}
+		if g != nil {
+			attrs = append(attrs, "origin", g.origin.Name)
+		}
+		iss.logRejection("subject token rejected", attrs...)
+		return nil, errSubjectToken
+	case err != nil:
+		return nil, err
+	}
+	return g, nil
+}
+
+// exchangeJWT verifies a JWT from an upstream against the one origin it
+// reaches, and asks that origin for an identity. A rejection comes back
+// with the grant when an origin was reached, for the log.
+func (iss *Issuer) exchangeJWT(r *http.Request, view *policy.View, raw string) (*grant, error) {
+	token, err := exchange.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	if token.Issuer == iss.cfg.URL {
+		return nil, fmt.Errorf("%w: the token comes from this issuer", exchange.ErrRejected)
+	}
+	reached := view.Reached(token.Issuer, token.Audience)
+	switch len(reached) {
+	case 0:
+		return nil, fmt.Errorf("%w: no origin takes tokens from %q with audiences %q", exchange.ErrRejected, token.Issuer, token.Audience)
+	case 1:
+	default:
+		return nil, fmt.Errorf("%w: the audiences %q name %d origins", exchange.ErrRejected, token.Audience, len(reached))
+	}
+	g := &grant{origin: reached[0]}
+	claims, err := token.Verify(r.Context(), g.origin.JWT, g.origin.Keys, iss.cfg.Now())
+	if errors.Is(err, exchange.ErrRejected) {
+		return g, err
 	}
 	if err != nil {
-		return spiffeid.ID{}, err
+		return nil, fmt.Errorf("origin %s: %w", g.origin.Name, err)
 	}
-	return id, nil
+	g.id, err = g.origin.Admit(iss.cfg.TrustDomain, claims)
+	return g, err
+}
+
+// exchangeExec has the named exec origin's verifier check the proof, and
+// asks the origin for an identity from the claims it made.
+func (iss *Issuer) exchangeExec(r *http.Request, view *policy.View, name, proof string) (*grant, error) {
+	origin, ok := view.Exec(name)
+	if !ok {
+		return nil, fmt.Errorf("%w: no exec origin is named %q", verifier.ErrRejected, name)
+	}
+	g := &grant{origin: origin}
+	claims, err := iss.cfg.Verifiers.Run(r.Context(), verifier.Request{
+		Issuer:       iss.cfg.URL,
+		Origin:       origin.Expanded,
+		SubjectToken: proof,
+		Client:       iss.clientAddress(r),
+	})
+	if errors.Is(err, verifier.ErrRejected) {
+		return g, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("origin %s: %w", name, err)
+	}
+	g.id, err = origin.Admit(iss.cfg.TrustDomain, claims)
+	return g, err
+}
+
+// clientAddress is the address a request came from. When the peer is a
+// trusted proxy, it is the rightmost address in X-Forwarded-For that is not
+// itself a trusted proxy: addresses further left were written by whoever
+// sent the request, and could be anything.
+func (iss *Issuer) clientAddress(r *http.Request) netip.Addr {
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}
+	}
+	addr := ap.Addr().Unmap()
+	if !iss.trustedProxy(addr) {
+		return addr
+	}
+	var hops []string
+	for _, v := range r.Header.Values("X-Forwarded-For") {
+		hops = append(hops, strings.Split(v, ",")...)
+	}
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+		if err != nil {
+			return addr
+		}
+		addr = hop.Unmap()
+		if !iss.trustedProxy(addr) {
+			return addr
+		}
+	}
+	return addr
+}
+
+func (iss *Issuer) trustedProxy(addr netip.Addr) bool {
+	for _, p := range iss.cfg.TrustedProxies {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// logRejection logs why a request was refused. Anyone can send requests,
+// so the lines are rate limited.
+func (iss *Issuer) logRejection(msg string, attrs ...any) {
+	if iss.rejectLog.allow(iss.cfg.Now()) {
+		iss.cfg.Logger.Info(msg, attrs...)
+	}
 }
 
 // singleValued rejects any repeated parameter except the two that may repeat.
@@ -240,64 +357,59 @@ func singleValued(form url.Values) error {
 	return nil
 }
 
-func checkAudienceAllowed(requested, allowed []string) error {
-	if len(allowed) == 0 {
-		return nil
-	}
-	for _, aud := range requested {
-		if !slices.Contains(allowed, aud) {
-			return errInvalidTarget
-		}
-	}
-	return nil
-}
-
-// authenticateClient verifies a private_key_jwt client assertion (RFC 7523).
-func (iss *Issuer) authenticateClient(form url.Values) (Client, error) {
+// authenticateClient verifies a private_key_jwt client assertion (SPEC
+// section 3.2).
+func (iss *Issuer) authenticateClient(view *policy.View, form url.Values) (*grant, error) {
 	if form.Get("client_assertion_type") != ClientAssertionJWT {
-		return Client{}, errInvalidRequest("client_assertion_type must be %s", ClientAssertionJWT)
+		return nil, errInvalidRequest("client_assertion_type must be %s", ClientAssertionJWT)
 	}
 	raw := form.Get("client_assertion")
 	if raw == "" {
-		return Client{}, errInvalidRequest("client_assertion is required")
+		return nil, errInvalidRequest("client_assertion is required")
 	}
 	assertion, err := jwt.ParseSigned(raw, assertionAlgorithms)
 	if err != nil || len(assertion.Headers) != 1 {
-		return Client{}, errClientAuth
+		return nil, errClientAuth
 	}
 
 	clientID := form.Get("client_id")
 	if clientID == "" {
-		// RFC 7523 lets the client omit client_id; the assertion's issuer then
-		// names it. It is only a lookup key until the signature is checked.
+		// The client may omit client_id; the assertion's issuer then names
+		// it. It is only a lookup key until the signature is checked.
 		var unverified jwt.Claims
 		if err := assertion.UnsafeClaimsWithoutVerification(&unverified); err != nil {
-			return Client{}, errClientAuth
+			return nil, errClientAuth
 		}
 		clientID = unverified.Issuer
 	}
-	client, ok := iss.cfg.Clients.Client(clientID)
-	keys := client.PublicKeys
-	if !ok {
-		// Spend the same effort as for a known client, so response times do
-		// not reveal which client ids exist.
-		keys = []crypto.PublicKey{decoyKeys()[assertion.Headers[0].Algorithm]}
+	origin, member, keys, ok := view.Member(clientID)
+	alg := assertion.Headers[0].Algorithm
+	keys = keysFor(alg, keys)
+	if !ok || len(keys) == 0 {
+		// Spend the same effort as for a client with a key of this type, so
+		// response times reveal neither which client ids exist nor which
+		// types of key they have.
+		keys, ok = []crypto.PublicKey{decoyKeys()[alg]}, false
 	}
 	var claims jwt.Claims
 	if !verifyWithAny(assertion, keys, &claims) || !ok {
 		iss.cfg.Logger.Debug("client authentication failed", "unverified_client_id", clientID)
-		return Client{}, errClientAuth
+		return nil, errClientAuth
 	}
 	now := iss.cfg.Now()
 	if err := iss.checkAssertionClaims(claims, clientID, now); err != nil {
-		iss.cfg.Logger.Info("rejected client assertion", "client_id", clientID, "reason", err)
-		return Client{}, errClientAuth
+		iss.logRejection("rejected client assertion", "client_id", clientID, "reason", err)
+		return nil, errClientAuth
 	}
 	if !iss.replay.use(clientID, claims.ID, claims.Expiry.Time().Add(clockSkew), now) {
 		iss.cfg.Logger.Warn("rejected a replayed client assertion", "client_id", clientID)
-		return Client{}, errClientAuth
+		return nil, errClientAuth
 	}
-	return client, nil
+	id, err := origin.MemberID(iss.cfg.TrustDomain, member)
+	if err != nil {
+		return nil, fmt.Errorf("naming member %s: %w", clientID, err)
+	}
+	return &grant{id: id, origin: origin}, nil
 }
 
 // decoyKeys has one key per accepted algorithm, so verifying an unknown
@@ -313,6 +425,24 @@ var decoyKeys = sync.OnceValue(func() map[string]crypto.PublicKey {
 	}
 	return map[string]crypto.PublicKey{string(jose.ES256): &ec.PublicKey, string(jose.RS256): &rsaKey.PublicKey}
 })
+
+// keysFor returns the keys that can verify a signature made with alg.
+func keysFor(alg string, keys []crypto.PublicKey) []crypto.PublicKey {
+	var out []crypto.PublicKey
+	for _, k := range keys {
+		switch k.(type) {
+		case *ecdsa.PublicKey:
+			if alg == string(jose.ES256) {
+				out = append(out, k)
+			}
+		case *rsa.PublicKey:
+			if alg == string(jose.RS256) {
+				out = append(out, k)
+			}
+		}
+	}
+	return out
+}
 
 func verifyWithAny(assertion *jwt.JSONWebToken, keys []crypto.PublicKey, claims *jwt.Claims) bool {
 	for _, key := range keys {

@@ -3,7 +3,6 @@ package state
 import (
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -19,10 +18,6 @@ var subjectTokenAlgorithms = []jose.SignatureAlgorithm{
 	jose.ES256, jose.ES384, jose.ES512,
 	jose.EdDSA,
 }
-
-// clockSkew is allowed on time comparisons with an upstream's clock, and on
-// top of max_token_lifetime (SPEC section 3.3).
-const clockSkew = 30 * time.Second
 
 // Explanation tells how a subject token would fare against a state: the
 // origin it reaches, whether that origin admits it and why not, and the
@@ -83,21 +78,15 @@ func explainAt(st *State, s Settings, token string, now time.Time) (*Explanation
 		return refuse("the token comes from this issuer, whose tokens cannot be exchanged"), nil
 	}
 
-	var reached []*Expanded
-	var otherAudiences []string
-	for _, name := range sortedKeys(report.Origins) {
-		e := report.Origins[name]
-		if e.JWT == nil || e.JWT.Issuer != x.Issuer {
-			continue
-		}
-		if slices.Contains(x.Audiences, e.JWT.Audience) {
-			reached = append(reached, e)
-		} else {
-			otherAudiences = append(otherAudiences, fmt.Sprintf("origin %s wants audience %s", name, e.JWT.Audience))
-		}
-	}
+	reached := Reached(report.Origins, x.Issuer, x.Audiences)
 	switch len(reached) {
 	case 0:
+		var otherAudiences []string
+		for _, name := range sortedKeys(report.Origins) {
+			if e := report.Origins[name]; e.JWT != nil && e.JWT.Issuer == x.Issuer {
+				otherAudiences = append(otherAudiences, fmt.Sprintf("origin %s wants audience %s", name, e.JWT.Audience))
+			}
+		}
 		if len(otherAudiences) > 0 {
 			return refuse("no origin takes tokens from %s with these audiences (%s)", x.Issuer, strings.Join(otherAudiences, "; ")), nil
 		}
@@ -116,18 +105,18 @@ func explainAt(st *State, s Settings, token string, now time.Time) (*Explanation
 	switch {
 	case times.Expiry == nil:
 		x.Reasons = append(x.Reasons, "the token has no exp claim")
-	case now.Add(-clockSkew).After(times.Expiry.Time()):
+	case now.Add(-ClockSkew).After(times.Expiry.Time()):
 		x.Reasons = append(x.Reasons, fmt.Sprintf("the token expired at %s", times.Expiry.Time().UTC().Format(time.RFC3339)))
 	}
-	if times.NotBefore != nil && now.Add(clockSkew).Before(times.NotBefore.Time()) {
+	if times.NotBefore != nil && now.Add(ClockSkew).Before(times.NotBefore.Time()) {
 		x.Reasons = append(x.Reasons, fmt.Sprintf("the token is not valid before %s", times.NotBefore.Time().UTC().Format(time.RFC3339)))
 	}
 	switch {
 	case times.IssuedAt == nil:
 		x.Reasons = append(x.Reasons, "the token has no iat claim")
 	case times.Expiry != nil:
-		if lifetime := times.Expiry.Time().Sub(times.IssuedAt.Time()); lifetime > e.JWT.MaxTokenLifetime+clockSkew {
-			x.Reasons = append(x.Reasons, fmt.Sprintf("the token was issued to live %s, longer than the %s (plus %s) origin %s accepts", lifetime, e.JWT.MaxTokenLifetime, clockSkew, e.Name))
+		if lifetime := times.Expiry.Time().Sub(times.IssuedAt.Time()); !e.JWT.AllowsLifetime(lifetime) {
+			x.Reasons = append(x.Reasons, fmt.Sprintf("the token was issued to live %s, longer than the %s (plus %s) origin %s accepts", lifetime, e.JWT.MaxTokenLifetime, ClockSkew, e.Name))
 		}
 	}
 

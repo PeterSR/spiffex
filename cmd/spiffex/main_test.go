@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PeterSR/spiffex/internal/config"
+	"github.com/PeterSR/spiffex/internal/agent"
 	"github.com/PeterSR/spiffex/internal/keyset"
+	"github.com/PeterSR/spiffex/internal/settings"
+	"github.com/PeterSR/spiffex/internal/state"
+	"github.com/PeterSR/spiffex/internal/store"
 )
 
 func TestFlagsFromEnvironment(t *testing.T) {
@@ -34,26 +37,41 @@ func TestFlagsFromEnvironment(t *testing.T) {
 	}
 }
 
-// What "spiffex dev" writes is a configuration the issuer accepts, with keys
-// the agent can use.
+// What "spiffex dev" writes is settings and a state the issuer accepts,
+// with keys the agent can use.
 func TestDevCreatesAWorkingTrustDomain(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "td")
 	stdout := os.Stdout
 	os.Stdout, _ = os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	defer func() { os.Stdout = stdout }()
 	err := runDev(context.Background(), []string{"-dir", dir, "-workloads", "orders,billing,shipping"})
-	os.Stdout = stdout
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Load(filepath.Join(dir, "issuer.yaml"))
+	s, err := settings.Load(filepath.Join(dir, "issuer.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Clients) != 3 || cfg.Clients["shipping"].SPIFFEID.String() != "spiffe://spiffex.test/shipping" {
-		t.Errorf("clients = %v", cfg.Clients)
+	snap, err := (&store.File{Path: s.State.File}).Load(context.Background())
+	if err != nil || snap.Problem != nil {
+		t.Fatalf("loading the state: %v %v", err, snap.Problem)
 	}
-	if _, err := keyset.LoadDir(cfg.KeysDir); err != nil {
+	report := state.Validate(snap.State, s.Validation)
+	if err := report.Err(); err != nil {
+		t.Fatal(err)
+	}
+	origin := report.Origins["dev"]
+	if origin == nil || len(origin.Members) != 3 {
+		t.Fatalf("origin dev = %+v", origin)
+	}
+	if id, err := origin.MemberID(s.TrustDomain(), "shipping"); err != nil || id.String() != "spiffe://spiffex.test/dev/shipping" {
+		t.Errorf("shipping is %v (%v)", id, err)
+	}
+	if _, err := keyset.LoadDir(s.KeysDir); err != nil {
 		t.Error(err)
+	}
+	if err := keyList([]string{"-config", filepath.Join(dir, "issuer.yaml")}); err != nil {
+		t.Errorf("key list with the settings file: %v", err)
 	}
 	for _, w := range []string{"orders", "billing", "shipping"} {
 		data, err := os.ReadFile(filepath.Join(dir, "workloads", w+".key"))
@@ -121,5 +139,43 @@ func TestKeyCommands(t *testing.T) {
 func TestUnknownCommand(t *testing.T) {
 	if err := run(context.Background(), []string{"frobnicate"}, io.Discard); err == nil {
 		t.Error("an unknown command succeeded")
+	}
+}
+
+func TestCredentialFlags(t *testing.T) {
+	credential := func(args ...string) (agent.Credential, error) {
+		fs := newFlagSet("x", "")
+		fs.SetOutput(io.Discard)
+		creds := addCredentialFlags(fs)
+		if err := parseFlags(fs, args); err != nil {
+			return nil, err
+		}
+		return creds.credential()
+	}
+	cred, err := credential("-subject-token-command", `["/usr/bin/sign", "--for", "an issuer"]`, "-subject-token-type", "exec", "-origin", "aws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := cred.(agent.SubjectToken); !ok || len(st.Command) != 3 || st.Command[2] != "an issuer" || st.Origin != "aws" {
+		t.Errorf("credential = %#v", cred)
+	}
+	cred, err = credential("-subject-token-command", "/usr/bin/sign --for spiffex")
+	if st, ok := cred.(agent.SubjectToken); err != nil || !ok || len(st.Command) != 3 || st.Origin != "" {
+		t.Errorf("credential = %#v, %v", cred, err)
+	}
+	for _, args := range [][]string{
+		{"-subject-token-file", "/t", "-subject-token-command", "/c"},
+		{"-subject-token-file", "/t", "-subject-token-type", "exec"},
+		{"-subject-token-file", "/t", "-origin", "aws"},
+		{"-subject-token-file", "/t", "-subject-token-type", "saml"},
+		{"-subject-token-command", "[1, 2]"},
+		{"-subject-token-command", "  "},
+		{"-client-id", "dev/billing", "-key-file", "/k", "-subject-token-file", "/t"},
+		{"-client-id", "dev/billing", "-origin", "aws"},
+		{},
+	} {
+		if _, err := credential(args...); err == nil {
+			t.Errorf("%q: accepted", args)
+		}
 	}
 }

@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,15 +35,39 @@ import (
 
 	"github.com/PeterSR/spiffex/internal/issuer"
 	"github.com/PeterSR/spiffex/internal/keyset"
+	"github.com/PeterSR/spiffex/internal/policy"
+	"github.com/PeterSR/spiffex/internal/state"
+	"github.com/PeterSR/spiffex/internal/store"
 )
 
 var td = spiffeid.RequireTrustDomainFromString("example.org")
 
-type clientMap map[string]issuer.Client
-
-func (m clientMap) Client(id string) (issuer.Client, bool) {
-	c, ok := m[id]
-	return c, ok
+// workloadPolicy has one keys origin at the root of the trust domain, with
+// the billing workload as its member.
+func workloadPolicy(t *testing.T, issuerURL string, key *ecdsa.PublicKey) *policy.Policy {
+	t.Helper()
+	der, err := x509.MarshalPKIXPublicKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemKey, _ := json.Marshal(string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})))
+	st, err := state.ParseState([]byte(`
+origins:
+  workloads:
+    provider: keys
+    prefix: /
+    audiences: [orders, payments]
+    members:
+      billing: { keys: [` + string(pemKey) + `] }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := policy.New(policy.Options{Settings: state.DefaultSettings(issuerURL, td)})
+	if err := p.Apply(&store.Snapshot{Version: "1", State: st}); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 type fixture struct {
@@ -84,12 +110,8 @@ func newFixture(t *testing.T) *fixture {
 		URL:         srv.URL,
 		TrustDomain: td,
 		Keys:        watcher,
-		Clients: clientMap{"billing": {
-			ID: "billing", SPIFFEID: spiffeid.RequireFromPath(td, "/billing"),
-			PublicKeys: []crypto.PublicKey{&clientKey.PublicKey},
-			Audiences:  []string{"orders", "payments"},
-		}},
-		Logger: quiet(),
+		Policy:      workloadPolicy(t, srv.URL, &clientKey.PublicKey),
+		Logger:      quiet(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +129,7 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := New(Config{Issuer: client, Credential: PrivateKeyJWT{ClientID: "billing", Key: clientKey}, Logger: quiet()})
+	a, err := New(Config{Issuer: client, Credential: PrivateKeyJWT{ClientID: "workloads/billing", Key: clientKey}, Logger: quiet()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,9 +450,11 @@ func TestNewRejectsBadCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, cred := range map[string]Credential{
-		"P-384 key":       PrivateKeyJWT{ClientID: "billing", Key: p384},
-		"no client id":    PrivateKeyJWT{Key: p384},
-		"no subject file": SubjectTokenFile{},
+		"P-384 key":        PrivateKeyJWT{ClientID: "billing", Key: p384},
+		"no client id":     PrivateKeyJWT{Key: p384},
+		"no subject token": SubjectToken{},
+		"file and command": SubjectToken{File: "/token", Command: []string{"/bin/true"}},
+		"empty command":    SubjectToken{Command: []string{""}},
 	} {
 		if _, err := New(Config{Issuer: &IssuerClient{}, Credential: cred}); err == nil {
 			t.Errorf("%s: accepted", name)

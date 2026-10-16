@@ -16,8 +16,8 @@ WORK="$(mktemp -d)"   # short, so socket paths stay under the Unix limit
 PORT="${SPIFFEX_CONFORMANCE_PORT:-18443}"
 ISSUER="http://127.0.0.1:$PORT"
 TD=spiffex.test
-AUD="spiffe://$TD/orders"
-WANT="spiffe://$TD/billing"
+AUD="spiffe://$TD/dev/orders"
+WANT="spiffe://$TD/dev/billing"
 
 pids=()
 stop() {
@@ -51,7 +51,7 @@ start() { # algorithm
   pids+=($!)
   until_ok "the issuer" curl -fs "$ISSUER/healthz"
   for w in orders billing; do
-    "$WORK/spiffex" agent -issuer "$ISSUER" -client-id "$w" -key-file "$td/workloads/$w.key" \
+    "$WORK/spiffex" agent -issuer "$ISSUER" -client-id "dev/$w" -key-file "$td/workloads/$w.key" \
       -socket "$WORK/$w.sock" -log-level warn &
     pids+=($!)
   done
@@ -67,9 +67,9 @@ fetch() {
   case $1 in
     go-spiffe) as billing "$WORK/goclient" fetch "$AUD" ;;
     py-spiffe) as billing py fetch "$AUD" ;;
-    oauth) "$WORK/spiffex" token -issuer "$ISSUER" -client-id billing -key-file "$TOKEN_KEYS/billing.key" -audience "$AUD" ;;
-    oauth-2-audiences) "$WORK/spiffex" token -issuer "$ISSUER" -client-id billing -key-file "$TOKEN_KEYS/billing.key" \
-      -audience "spiffe://$TD/inventory" -audience "$AUD" ;;
+    oauth) "$WORK/spiffex" token -issuer "$ISSUER" -client-id dev/billing -key-file "$TOKEN_KEYS/billing.key" -audience "$AUD" ;;
+    oauth-2-audiences) "$WORK/spiffex" token -issuer "$ISSUER" -client-id dev/billing -key-file "$TOKEN_KEYS/billing.key" \
+      -audience "spiffe://$TD/dev/inventory" -audience "$AUD" ;;
   esac
 }
 
@@ -103,7 +103,7 @@ for alg in ES256 RS256; do
         continue
       fi
       code=0
-      verify "$v" "spiffe://$TD/elsewhere" "$token" >/dev/null 2>&1 || code=$?
+      verify "$v" "spiffe://$TD/dev/elsewhere" "$token" >/dev/null 2>&1 || code=$?
       if [ "$code" != 3 ]; then
         echo "FAIL: the wrong audience gave exit code $code, want 3 (refused)"
         failures=$((failures + 1))

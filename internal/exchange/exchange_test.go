@@ -4,15 +4,16 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
-	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,20 +22,14 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
-)
 
-var td = spiffeid.RequireTrustDomainFromString("example.org")
+	"github.com/PeterSR/spiffex/internal/state"
+)
 
 const (
 	k8sIssuer = "https://kubernetes.default.svc.cluster.local"
-	self      = "https://issuer.example.org"
+	audience  = "https://issuer.example.org/origins/kube"
 )
-
-type staticKeys struct{ set *jose.JSONWebKeySet }
-
-func (s staticKeys) Keys(context.Context, string) (*jose.JSONWebKeySet, error) { return s.set, nil }
 
 type upstreamKey struct {
 	priv *ecdsa.PrivateKey
@@ -54,76 +49,46 @@ func (k upstreamKey) jwks() *jose.JSONWebKeySet {
 	return &jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &k.priv.PublicKey, KeyID: k.kid, Algorithm: "ES256", Use: "sig"}}}
 }
 
-// serviceAccountClaims looks like a Kubernetes projected service account token.
-func serviceAccountClaims(namespace, name string) map[string]any {
-	now := time.Now()
-	return map[string]any{
-		"iss": k8sIssuer,
-		"sub": "system:serviceaccount:" + namespace + ":" + name,
-		"aud": []string{"spiffex"},
-		"exp": now.Add(time.Hour).Unix(),
-		"iat": now.Unix(),
-		"nbf": now.Unix(),
-		"kubernetes.io": map[string]any{
-			"namespace":      namespace,
-			"serviceaccount": map[string]any{"name": name, "uid": "8f2c"},
-		},
-	}
-}
-
-func (k upstreamKey) sign(t *testing.T, claims map[string]any) string {
+func (k upstreamKey) signRaw(t *testing.T, payload string) string {
 	t.Helper()
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: jose.JSONWebKey{Key: k.priv, KeyID: k.kid}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := jwt.Signed(signer).Claims(claims).Serialize()
+	jws, err := signer.Sign([]byte(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := jws.CompactSerialize()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return token
 }
 
-func newExchanger(t *testing.T, key upstreamKey) *Exchanger {
+func (k upstreamKey) sign(t *testing.T, claims map[string]any) string {
 	t.Helper()
-	e, err := New(td, self, []Upstream{{
-		Name:     "kubernetes",
-		Issuer:   k8sIssuer,
-		Audience: "spiffex",
-		Keys:     staticKeys{key.jwks()},
-		Rules: []Rule{
-			{Match: map[string]string{"kubernetes.io/namespace": "kube-system"}, SPIFFEID: "spiffe://example.org/system/{kubernetes.io/serviceaccount/name}"},
-			{SPIFFEID: "spiffe://example.org/ns/{kubernetes.io/namespace}/sa/{kubernetes.io/serviceaccount/name}"},
-		},
-	}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	payload, err := json.Marshal(claims)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return e
+	return k.signRaw(t, string(payload))
 }
 
-func TestExchange(t *testing.T) {
-	key := newUpstreamKey(t, "k1")
-	e := newExchanger(t, key)
-	cases := map[string]struct {
-		claims map[string]any
-		want   string
-	}{
-		"general rule":     {serviceAccountClaims("shop", "billing"), "spiffe://example.org/ns/shop/sa/billing"},
-		"first rule wins":  {serviceAccountClaims("kube-system", "coredns"), "spiffe://example.org/system/coredns"},
-		"dots and dashes":  {serviceAccountClaims("shop-2", "billing.v2"), "spiffe://example.org/ns/shop-2/sa/billing.v2"},
-		"audience in list": {with(serviceAccountClaims("shop", "billing"), "aud", []string{"other", "spiffex"}), "spiffe://example.org/ns/shop/sa/billing"},
-	}
-	for name, c := range cases {
-		t.Run(name, func(t *testing.T) {
-			id, err := e.Exchange(context.Background(), key.sign(t, c.claims))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if id.String() != c.want {
-				t.Errorf("got %s, want %s", id, c.want)
-			}
-		})
+// serviceAccountClaims looks like a Kubernetes projected service account token.
+func serviceAccountClaims(lifetime time.Duration) map[string]any {
+	now := time.Now()
+	return map[string]any{
+		"iss": k8sIssuer,
+		"sub": "system:serviceaccount:shop:billing",
+		"aud": []string{audience},
+		"exp": now.Add(lifetime).Unix(),
+		"iat": now.Unix(),
+		"nbf": now.Unix(),
+		"kubernetes.io": map[string]any{
+			"namespace":      "shop",
+			"serviceaccount": map[string]any{"name": "billing"},
+		},
 	}
 }
 
@@ -137,134 +102,199 @@ func without(claims map[string]any, key string) map[string]any {
 	return claims
 }
 
-func TestExchangeRejects(t *testing.T) {
-	key := newUpstreamKey(t, "k1")
-	stranger := newUpstreamKey(t, "k1")
-	e := newExchanger(t, key)
-	sa := func() map[string]any { return serviceAccountClaims("shop", "billing") }
-	nested := func(ns string) map[string]any {
-		c := sa()
-		c["kubernetes.io"].(map[string]any)["namespace"] = ns
-		return c
-	}
+func origin() *state.ExpandedJWT {
+	return &state.ExpandedJWT{Issuer: k8sIssuer, Audience: audience, MaxTokenLifetime: time.Hour}
+}
 
+func verify(t *testing.T, key upstreamKey, token string) (map[string]any, error) {
+	t.Helper()
+	parsed, err := Parse(token)
+	if err != nil {
+		return nil, err
+	}
+	return parsed.Verify(context.Background(), origin(), StaticKeys{key.jwks()}, time.Now())
+}
+
+func TestVerify(t *testing.T) {
+	key := newUpstreamKey(t, "k1")
+	claims, err := verify(t, key, key.sign(t, serviceAccountClaims(time.Hour)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := state.ClaimValue(claims, "kubernetes.io/serviceaccount/name"); v != "billing" {
+		t.Errorf("claims = %v", claims)
+	}
+	// Kubernetes adds a few seconds to the lifetimes it is asked for.
+	if _, err := verify(t, key, key.sign(t, serviceAccountClaims(time.Hour+7*time.Second))); err != nil {
+		t.Errorf("a 3607 second token: %v", err)
+	}
+}
+
+func TestVerifyRejects(t *testing.T) {
+	key, stranger := newUpstreamKey(t, "k1"), newUpstreamKey(t, "k1")
+	now := time.Now()
 	cases := map[string]string{
-		"unknown issuer":         key.sign(t, with(sa(), "iss", "https://elsewhere")),
-		"own tokens":             key.sign(t, with(sa(), "iss", self)),
-		"wrong audience":         key.sign(t, with(sa(), "aud", []string{"something-else"})),
-		"no exp":                 key.sign(t, without(sa(), "exp")),
-		"expired":                key.sign(t, with(sa(), "exp", time.Now().Add(-time.Hour).Unix())),
-		"not yet valid":          key.sign(t, with(sa(), "nbf", time.Now().Add(time.Hour).Unix())),
-		"signed by someone else": stranger.sign(t, sa()),
-		"slash in a claim":       key.sign(t, nested("shop/sa/admin")),
-		"dot-dot in a claim":     key.sign(t, nested("..")),
-		"empty claim":            key.sign(t, nested("")),
-		"percent in a claim":     key.sign(t, nested("shop%2Fadmin")),
-		"claim missing":          key.sign(t, without(sa(), "kubernetes.io")),
-		"HS256":                  hs256(t, sa()),
-		"alg none":               unsigned(sa()),
-		"garbage":                "not.a.token",
+		"signed by another key": stranger.sign(t, serviceAccountClaims(time.Hour)),
+		"expired":               key.sign(t, with(serviceAccountClaims(time.Hour), "exp", now.Add(-time.Minute).Unix())),
+		"not yet valid":         key.sign(t, with(serviceAccountClaims(time.Hour), "nbf", now.Add(time.Hour).Unix())),
+		"no exp":                key.sign(t, without(serviceAccountClaims(time.Hour), "exp")),
+		"no iat":                key.sign(t, without(serviceAccountClaims(time.Hour), "iat")),
+		"lives too long":        key.sign(t, serviceAccountClaims(time.Hour+31*time.Second)),
+		"another audience":      key.sign(t, with(serviceAccountClaims(time.Hour), "aud", "elsewhere")),
+		"another issuer":        key.sign(t, with(serviceAccountClaims(time.Hour), "iss", "https://elsewhere")),
+		"duplicate claims":      key.signRaw(t, `{"iss":"`+k8sIssuer+`","aud":"`+audience+`","exp":9999999999,"iat":9999990000,"sub":"a","sub":"b"}`),
+		"HMAC":                  hs256(t, serviceAccountClaims(time.Hour)),
+		"not a JWT":             "not-a-jwt",
 	}
 	for name, token := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := e.Exchange(context.Background(), token)
-			if !errors.Is(err, ErrRejected) {
-				t.Fatalf("err = %v, want a rejection", err)
+			if _, err := verify(t, key, token); !errors.Is(err, ErrRejected) {
+				t.Errorf("err = %v, want a rejection", err)
 			}
 		})
 	}
 }
+
+func TestVerifyKeepsNumbersExact(t *testing.T) {
+	key := newUpstreamKey(t, "k1")
+	now := time.Now().Unix()
+	payload := `{"iss":"` + k8sIssuer + `","aud":"` + audience + `","exp":` + itoa(now+60) + `,"iat":` + itoa(now) + `,"id":12345678901234567890,"f":1.5}`
+	claims, err := verify(t, key, key.signRaw(t, payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := state.ClaimValue(claims, "id"); !ok || v != "12345678901234567890" {
+		t.Errorf("id = %q (%v), want the integer exactly as written", v, ok)
+	}
+	if _, ok := state.ClaimValue(claims, "f"); ok {
+		t.Error("a fraction counted as a value")
+	}
+}
+
+func itoa(n int64) string { b, _ := json.Marshal(n); return string(b) }
 
 func hs256(t *testing.T, claims map[string]any) string {
 	t.Helper()
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.HS256, Key: []byte("0123456789abcdef0123456789abcdef")}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	token, err := jwt.Signed(signer).Claims(claims).Serialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return token
-}
-
-func unsigned(claims map[string]any) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	body, _ := json.Marshal(claims)
-	enc := func(b []byte) string { return strings.TrimRight(base64URL(b), "=") }
-	return enc([]byte(`{"alg":"none"}`)) + "." + enc(body) + "."
+	payload := base64.RawURLEncoding.EncodeToString(body)
+	mac := hmac.New(sha256.New, []byte("secret"))
+	mac.Write([]byte(header + "." + payload))
+	return header + "." + payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func TestNewRejectsBadUpstreams(t *testing.T) {
-	keys := staticKeys{newUpstreamKey(t, "k").jwks()}
-	good := func() Upstream {
-		return Upstream{Name: "u", Issuer: k8sIssuer, Audience: "spiffex", Keys: keys, Rules: []Rule{{SPIFFEID: "spiffe://example.org/{sub}"}}}
+func TestUnverifiedIssuers(t *testing.T) {
+	enc := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	cases := map[string][]string{
+		enc(`{"alg":"none"}`) + "." + enc(`{"iss":"a"}`) + ".":                                                            {"a"},
+		enc(`{"alg":"HS256"}`) + "." + enc(`{"iss":"a","iss":"b"}`) + ".x":                                                {"a", "b"},
+		"x." + base64.StdEncoding.EncodeToString([]byte(`{"iss":"a?>"}`)) + ".y":                                          {"a?>"},
+		"x." + base64.URLEncoding.EncodeToString([]byte(`{"iss":"ab"}`)) + ".y":                                           {"ab"},
+		`{"payload":"` + enc(`{"iss":"a"}`) + `","signatures":[]}`:                                                        {"a"},
+		` {"protected":"x","payload":"` + base64.StdEncoding.EncodeToString([]byte(`{"iss":"a"}`)) + `","signature":"y"}`: {"a"},
+		`{"payload": 7}`:                nil,
+		"opaque-proof":                  nil,
+		"a.b.c":                         nil,
+		"x." + enc(`["iss"]`) + ".y":    nil,
+		"x." + enc(`{"sub":"a"}`) + ".": nil,
 	}
-	cases := map[string]func(*Upstream){
-		"no issuer":            func(u *Upstream) { u.Issuer = "" },
-		"itself":               func(u *Upstream) { u.Issuer = self },
-		"no audience":          func(u *Upstream) { u.Audience = "" },
-		"no keys":              func(u *Upstream) { u.Keys = nil },
-		"no rules":             func(u *Upstream) { u.Rules = nil },
-		"foreign trust domain": func(u *Upstream) { u.Rules[0].SPIFFEID = "spiffe://other.org/{sub}" },
-		"partial segment":      func(u *Upstream) { u.Rules[0].SPIFFEID = "spiffe://example.org/ns-{sub}" },
-		"placeholder as host":  func(u *Upstream) { u.Rules[0].SPIFFEID = "spiffe://{sub}/x" },
-		"unbalanced braces":    func(u *Upstream) { u.Rules[0].SPIFFEID = "spiffe://example.org/{sub" },
-	}
-	for name, mutate := range cases {
-		t.Run(name, func(t *testing.T) {
-			u := good()
-			mutate(&u)
-			if _, err := New(td, self, []Upstream{u}, nil); err == nil {
-				t.Fatal("want an error")
-			}
-		})
-	}
-	if _, err := New(td, self, []Upstream{good(), good()}, nil); err == nil {
-		t.Error("the same issuer twice was accepted")
+	for token, want := range cases {
+		if got := UnverifiedIssuers(token); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("UnverifiedIssuers(%q) = %v, want %v", token, got, want)
+		}
 	}
 }
 
-func TestRemoteKeys(t *testing.T) {
-	first, second := newUpstreamKey(t, "first"), newUpstreamKey(t, "second")
-	var current atomic.Pointer[jose.JSONWebKeySet]
-	current.Store(first.jwks())
-	var fetches atomic.Int32
-	var srv *httptest.Server
-	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// keyServer serves a discovery document and a JWK Set over TLS, and writes
+// its CA certificate to a file for RemoteKeys to trust.
+type keyServer struct {
+	*httptest.Server
+	caFile  string
+	keys    atomic.Pointer[jose.JSONWebKeySet]
+	fetches atomic.Int32
+	// authorized counts requests that carried the bearer token, by path.
+	authorized map[string]*atomic.Int32
+	jwksURI    string
+}
+
+func newKeyServer(t *testing.T, key upstreamKey) *keyServer {
+	t.Helper()
+	ks := &keyServer{authorized: map[string]*atomic.Int32{"/.well-known/openid-configuration": {}, "/keys": {}}}
+	ks.keys.Store(key.jwks())
+	ks.Server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c := ks.authorized[r.URL.Path]; c != nil && r.Header.Get("Authorization") == "Bearer sa-token" {
+			c.Add(1)
+		}
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
-			json.NewEncoder(w).Encode(map[string]string{"issuer": srv.URL, "jwks_uri": srv.URL + "/keys"})
-		case "/keys":
-			fetches.Add(1)
-			if r.Header.Get("Authorization") != "Bearer sa-token" {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
+			jwksURI := ks.jwksURI
+			if jwksURI == "" {
+				jwksURI = ks.URL + "/keys"
 			}
-			json.NewEncoder(w).Encode(current.Load())
+			_ = json.NewEncoder(w).Encode(map[string]string{"issuer": ks.URL, "jwks_uri": jwksURI})
+		case "/keys":
+			ks.fetches.Add(1)
+			_ = json.NewEncoder(w).Encode(ks.keys.Load())
+		case "/redirect":
+			http.Redirect(w, r, "/keys", http.StatusFound)
+		case "/huge":
+			_, _ = w.Write([]byte(`{"keys":[],"pad":"` + strings.Repeat("x", maxJWKSBody) + `"}`))
+		case "/many":
+			set := jose.JSONWebKeySet{}
+			for range maxJWKSKeys + 1 {
+				set.Keys = append(set.Keys, key.jwks().Keys[0])
+			}
+			_ = json.NewEncoder(w).Encode(set)
 		}
 	}))
-	defer srv.Close()
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("sa-token\n"), 0o600); err != nil {
+	t.Cleanup(ks.Close)
+	ks.caFile = filepath.Join(t.TempDir(), "ca.crt")
+	if err := os.WriteFile(ks.caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ks.Certificate().Raw}), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	remote := &RemoteKeys{URL: srv.URL, Discover: true, Client: srv.Client(), BearerTokenFile: tokenFile}
+	return ks
+}
+
+func (ks *keyServer) host() string { return strings.TrimPrefix(ks.URL, "https://") }
+
+func tokenFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("sa-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// waitIdle waits for a background refresh, if one runs.
+func (r *RemoteKeys) waitIdle() {
+	r.mu.Lock()
+	wait := r.refreshing
+	r.mu.Unlock()
+	if wait != nil {
+		<-wait
+	}
+}
+
+func TestRemoteKeysCaching(t *testing.T) {
+	first, second := newUpstreamKey(t, "first"), newUpstreamKey(t, "second")
+	ks := newKeyServer(t, first)
+	remote := &RemoteKeys{URL: ks.URL + "/keys", CAFile: ks.caFile}
 	ctx := context.Background()
 
 	set, err := remote.Keys(ctx, "first")
 	if err != nil || len(set.Key("first")) != 1 {
 		t.Fatalf("first fetch: %v %v", set, err)
 	}
-	if _, err := remote.Keys(ctx, "first"); err != nil || fetches.Load() != 1 {
-		t.Errorf("a known key was refetched: %d fetches, %v", fetches.Load(), err)
+	if _, err := remote.Keys(ctx, "first"); err != nil || ks.fetches.Load() != 1 {
+		t.Errorf("a known key was refetched: %d fetches, %v", ks.fetches.Load(), err)
 	}
-	// A key the cache lacks triggers a refetch in the background, but only
-	// once per interval.
-	current.Store(second.jwks())
+	// A key the cache lacks triggers a refetch, but only once per interval,
+	// and the first token signed with the new key already succeeds.
+	ks.keys.Store(second.jwks())
 	remote.mu.Lock()
 	remote.attempted = time.Now().Add(-jwksMinRefetch)
 	remote.mu.Unlock()
-	// The first token signed with the new key already succeeds.
 	if set, _ := remote.Keys(ctx, "second"); len(set.Key("second")) != 1 {
 		t.Error("an unknown kid did not wait for the refetch")
 	}
@@ -272,38 +302,98 @@ func TestRemoteKeys(t *testing.T) {
 		_, _ = remote.Keys(ctx, "third")
 		remote.waitIdle()
 	}
-	if n := fetches.Load(); n != 2 {
+	if n := ks.fetches.Load(); n != 2 {
 		t.Errorf("%d fetches, want 2: unknown kids must not trigger a fetch each", n)
 	}
 
-	// A caller that gives up at once does not cancel the refresh it started.
-	current.Store(first.jwks())
-	remote.mu.Lock()
-	remote.attempted = time.Now().Add(-jwksMinRefetch)
-	remote.mu.Unlock()
-	cancelled, cancel := context.WithCancel(ctx)
-	cancel()
-	_, _ = remote.Keys(cancelled, "first-again")
-	remote.waitIdle()
-	if n := fetches.Load(); n != 3 {
-		t.Errorf("%d fetches, want 3", n)
-	}
-
 	// Keys that could not be refreshed for too long are no longer trusted.
-	srv.Close()
+	ks.Close()
 	remote.mu.Lock()
 	remote.fetched = time.Now().Add(-jwksMaxStale - time.Minute)
 	remote.attempted = time.Time{}
 	remote.mu.Unlock()
-	if _, err := remote.Keys(ctx, "first"); err == nil {
+	if _, err := remote.Keys(ctx, "second"); err == nil {
 		t.Error("keys older than the staleness limit were served with the upstream down")
 	}
 }
 
-func TestRemoteKeysRequiresHTTPS(t *testing.T) {
-	remote := &RemoteKeys{URL: "http://example.org/keys"}
-	if _, err := remote.Keys(context.Background(), ""); err == nil {
+func TestRemoteKeysLimits(t *testing.T) {
+	key := newUpstreamKey(t, "k")
+	ks := newKeyServer(t, key)
+	for _, path := range []string{"/redirect", "/huge", "/many", "/missing"} {
+		remote := &RemoteKeys{URL: ks.URL + path, CAFile: ks.caFile}
+		if _, err := remote.Keys(context.Background(), ""); err == nil {
+			t.Errorf("%s: fetched keys", path)
+		}
+	}
+	if _, err := (&RemoteKeys{URL: "http://example.org/keys"}).Keys(context.Background(), ""); err == nil {
 		t.Error("fetched keys over plain http")
+	}
+	remote := &RemoteKeys{URL: ks.URL + "/keys", CAFile: ks.caFile, RefusePrivateAddresses: true}
+	if _, err := remote.Keys(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "refusing to connect") {
+		t.Errorf("fetched from a loopback address while refusing private ones: %v", err)
+	}
+	remote = &RemoteKeys{URL: ks.URL + "/keys", CAFile: ks.caFile, RefusePrivateAddresses: true, AllowPrivateHosts: []string{"127.0.0.1"}}
+	if _, err := remote.Keys(context.Background(), ""); err != nil {
+		t.Errorf("an exempt host was refused: %v", err)
+	}
+}
+
+// The bearer token goes only to an allowed host, and only to the host the
+// origin names: with discovery, never to the location the discovery
+// document gives.
+func TestRemoteKeysBearerToken(t *testing.T) {
+	key := newUpstreamKey(t, "k")
+	ks := newKeyServer(t, key)
+	token := tokenFile(t)
+	ctx := context.Background()
+
+	remote := &RemoteKeys{URL: ks.URL + "/keys", CAFile: ks.caFile, BearerTokenFile: token, BearerHosts: []string{ks.host()}}
+	if _, err := remote.Keys(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if ks.authorized["/keys"].Load() != 1 {
+		t.Error("the bearer token was not sent to the allowed jwks_uri host")
+	}
+
+	remote = &RemoteKeys{URL: ks.URL + "/keys", CAFile: ks.caFile, BearerTokenFile: token, BearerHosts: []string{"elsewhere.example"}}
+	if _, err := remote.Keys(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if ks.authorized["/keys"].Load() != 1 {
+		t.Error("the bearer token was sent to a host the settings do not allow")
+	}
+
+	remote = &RemoteKeys{URL: ks.URL + "/keys", CAFile: ks.caFile, BearerTokenFile: token, BearerHosts: []string{ks.host()}, BearerPaths: []string{"/openid/v1/jwks"}}
+	if _, err := remote.Keys(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if ks.authorized["/keys"].Load() != 1 {
+		t.Error("the bearer token was sent to a path the settings do not allow")
+	}
+
+	remote = &RemoteKeys{URL: ks.URL, Discover: true, CAFile: ks.caFile, BearerTokenFile: token, BearerHosts: []string{ks.host()}}
+	if _, err := remote.Keys(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if ks.authorized["/.well-known/openid-configuration"].Load() != 1 || ks.authorized["/keys"].Load() != 1 {
+		t.Error("with discovery, the bearer token must go with the discovery request and nowhere else")
+	}
+}
+
+func TestPublicAddress(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"8.8.8.8": true, "2606:4700::1111": true,
+		"127.0.0.1": false, "10.1.2.3": false, "172.16.0.1": false, "192.168.1.1": false, "169.254.169.254": false,
+		"100.64.0.1": false, "0.0.0.0": false, "::1": false, "fe80::1": false, "fd00::1": false, "::ffff:10.0.0.1": false,
+		"::ffff:8.8.8.8": true, "224.0.0.1": false,
+		"64:ff9b::a00:1": false, "64:ff9b::808:808": true, // NAT64
+		"2002:a00:1::1": false, "2002:808:808::1": true, // 6to4
+		"::a00:1": false, "::808:808": true, // IPv4-compatible
+	} {
+		if got := publicAddress(netip.MustParseAddr(addr)); got != want {
+			t.Errorf("publicAddress(%s) = %v, want %v", addr, got, want)
+		}
 	}
 }
 
@@ -331,137 +421,10 @@ func TestFileKeysReload(t *testing.T) {
 	if set, err := f.Keys(context.Background(), ""); err != nil || len(set.Key("b")) != 1 {
 		t.Errorf("file change not picked up: %v %v", set, err)
 	}
-}
-
-func base64URL(b []byte) string { return base64.URLEncoding.EncodeToString(b) }
-
-// waitIdle waits for a background refresh, if one runs.
-func (r *RemoteKeys) waitIdle() {
-	r.mu.Lock()
-	wait := r.refreshing
-	r.mu.Unlock()
-	if wait != nil {
-		<-wait
-	}
-}
-
-// The bearer token for fetching keys goes only to the configured host, even
-// when the upstream's discovery document names another.
-func TestRemoteKeysKeepsBearerTokenHome(t *testing.T) {
-	var leaked atomic.Bool
-	elsewhere := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" {
-			leaked.Store(true)
-		}
-	}))
-	defer elsewhere.Close()
-	var srv *httptest.Server
-	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{"issuer": srv.URL, "jwks_uri": elsewhere.URL + "/keys"})
-	}))
-	defer srv.Close()
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("sa-token"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("secret content"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client := srv.Client()
-	client.Transport.(*http.Transport).TLSClientConfig.RootCAs.AddCert(elsewhere.Certificate())
-	remote := &RemoteKeys{URL: srv.URL, Discover: true, Client: client, BearerTokenFile: tokenFile}
-	if _, err := remote.Keys(context.Background(), ""); err == nil {
-		t.Error("fetched keys from another host with the bearer token configured")
-	}
-	if leaked.Load() {
-		t.Error("the bearer token was sent to another host")
-	}
-}
-
-// signRaw signs a payload written by hand, so the test controls exactly how
-// numbers appear in the JSON.
-func (k upstreamKey) signRaw(t *testing.T, payload string) string {
-	t.Helper()
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: jose.JSONWebKey{Key: k.priv, KeyID: k.kid}}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	jws, err := signer.Sign([]byte(payload))
-	if err != nil {
-		t.Fatal(err)
-	}
-	token, err := jws.CompactSerialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return token
-}
-
-// Numbers are compared exactly as the token wrote them, and only integers
-// count, so no two different values can render the same SPIFFE ID.
-func TestNumericClaims(t *testing.T) {
-	key := newUpstreamKey(t, "k1")
-	e, err := New(td, self, []Upstream{{
-		Name: "ci", Issuer: k8sIssuer, Audience: "spiffex", Keys: staticKeys{key.jwks()},
-		Rules: []Rule{{Match: map[string]string{"owner_id": "9007199254740992"}, SPIFFEID: "spiffe://example.org/repo/{repo_id}"}},
-	}}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := func(owner, repo string) string {
-		return fmt.Sprintf(`{"iss":%q,"aud":"spiffex","exp":%d,"owner_id":%s,"repo_id":%s}`,
-			k8sIssuer, time.Now().Add(time.Hour).Unix(), owner, repo)
-	}
-	id, err := e.Exchange(context.Background(), key.signRaw(t, payload("9007199254740992", "12345678901234567890")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id.String() != "spiffe://example.org/repo/12345678901234567890" {
-		t.Errorf("got %s: a large integer lost precision", id)
-	}
-	for name, p := range map[string]string{
-		"neighbouring integer": payload("9007199254740993", "1"),
-		"fraction":             payload("9007199254740992.4", "1"),
-		"exponent":             payload("9.007199254740992e15", "1"),
-		"fractional template":  payload("9007199254740992", "0.1"),
-		"boolean template":     payload("9007199254740992", "true"),
-		"string true":          payload("9007199254740992", `"true"`),
-	} {
-		_, err := e.Exchange(context.Background(), key.signRaw(t, p))
-		if name == "string true" {
-			if err != nil {
-				t.Errorf("%s: %v; a string claim is a plain segment", name, err)
-			}
-			continue
-		}
-		if !errors.Is(err, ErrRejected) {
-			t.Errorf("%s: %v, want a rejection", name, err)
-		}
-	}
-}
-
-func TestLifetimeAndRequiredClaims(t *testing.T) {
-	key := newUpstreamKey(t, "k1")
-	e, err := New(td, self, []Upstream{{
-		Name: "k", Issuer: k8sIssuer, Audience: "spiffex", Keys: staticKeys{key.jwks()}, MaxTokenLifetime: time.Hour,
-		Rules: []Rule{{Require: []string{"kubernetes.io/pod/name"}, SPIFFEID: "spiffe://example.org/ns/{kubernetes.io/namespace}"}},
-	}}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pod := func() map[string]any {
-		c := serviceAccountClaims("shop", "billing")
-		c["kubernetes.io"].(map[string]any)["pod"] = map[string]any{"name": "billing-7d9f", "uid": "1"}
-		return c
-	}
-	if _, err := e.Exchange(context.Background(), key.sign(t, pod())); err != nil {
-		t.Fatalf("a pod-bound token: %v", err)
-	}
-	longLived := with(pod(), "exp", time.Now().Add(365*24*time.Hour).Unix())
-	for name, c := range map[string]map[string]any{
-		"not bound to a pod": serviceAccountClaims("shop", "billing"),
-		"year-long token":    longLived,
-		"no iat":             without(pod(), "iat"),
-	} {
-		if _, err := e.Exchange(context.Background(), key.sign(t, c)); !errors.Is(err, ErrRejected) {
-			t.Errorf("%s: %v, want a rejection", name, err)
-		}
+	if _, err := f.Keys(context.Background(), ""); err == nil || strings.Contains(err.Error(), "secret") {
+		t.Errorf("a broken file: %v; want an error that does not quote it", err)
 	}
 }

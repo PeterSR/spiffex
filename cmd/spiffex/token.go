@@ -9,7 +9,7 @@ import (
 )
 
 func runToken(ctx context.Context, args []string) error {
-	fs := newFlagSet("token", "-issuer URL -audience AUD (-client-id ID -key-file FILE | -subject-token-file FILE) [flags]")
+	fs := newFlagSet("token", "-issuer URL -audience AUD "+credentialSynopsis+" [flags]")
 	creds := addCredentialFlags(fs)
 	var audiences stringList
 	fs.Var(&audiences, "audience", "audience of the token (required; repeat for several)")

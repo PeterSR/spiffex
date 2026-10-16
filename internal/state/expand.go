@@ -421,20 +421,22 @@ func (x *expansion) checkBearer(j *ExpandedJWT, issuerParam, uriParam string) {
 	}
 	target, param, fieldName := j.JWKSURI, uriParam, "jwks_uri"
 	if j.Discovery {
-		target, param, fieldName = j.Issuer, issuerParam, "issuer"
+		target, param, fieldName = strings.TrimSuffix(j.Issuer, "/")+"/.well-known/openid-configuration", issuerParam, "issuer"
 	}
 	u, err := url.Parse(target)
 	if err != nil || u.Host == "" {
 		return // reported where the URL is checked
 	}
-	for _, h := range f.Hosts {
-		if strings.EqualFold(h, u.Host) {
-			return
-		}
+	// The settings are the operator's: say neither which hosts and paths
+	// they allow nor anything else about the token file.
+	switch {
+	case !slices.ContainsFunc(f.Hosts, func(h string) bool { return strings.EqualFold(h, u.Host) }):
+		err = fmt.Errorf("the issuer's settings do not allow the bearer token file to be sent to %s", u.Host)
+	case len(f.Paths) > 0 && (u.RawQuery != "" || !slices.Contains(f.Paths, u.Path)):
+		err = fmt.Errorf("the issuer's settings do not allow the bearer token file to be sent to %s on %s", u.Host, u.Path)
+	default:
+		return
 	}
-	// The settings are the operator's: say neither which hosts they allow
-	// nor anything else about the token file.
-	err = fmt.Errorf("the issuer's settings do not allow the bearer token file to be sent to %s", u.Host)
 	if param != "" {
 		x.paramProblem(param, err)
 		return

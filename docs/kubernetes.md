@@ -1,26 +1,31 @@
 # Kubernetes
 
 In a cluster, workloads need no key of their own: each pod proves who it is with its projected
-service account token, and the issuer trusts the cluster's service account issuer as an upstream.
-One rule maps every service account to a SPIFFE ID:
+service account token, and the issuer has an origin for the cluster, using the shipped
+`kubernetes` provider:
 
 ```yaml
-rules:
-  - require: [kubernetes.io/pod/name]
-    spiffe_id: spiffe://example.org/ns/{kubernetes.io/namespace}/sa/{kubernetes.io/serviceaccount/name}
+origins:
+  cluster:
+    provider: kubernetes
 ```
 
-Nothing has to be registered per workload, so there is no operator and no custom resource; a new
-service account has an identity the moment it exists. As written, that is every service account in
-the cluster, `kube-system` included; narrow the rule with `match` (on `kubernetes.io/namespace`, for
-one) if not all of them should get a JWT-SVID.
+A pod of service account `billing` in namespace `shop` then gets
+`spiffe://example.org/cluster/ns/shop/sa/billing`, provided its token was projected for the origin
+audience `https://spiffex-issuer.spiffex.svc/origins/cluster`. `spiffex provider show kubernetes`
+prints the provider.
 
-`require: [kubernetes.io/pod/name]` accepts only tokens bound to a pod running as that service
-account, which is what the kubelet projects. That stops a plain `kubectl create token`, but anyone
-allowed to create service account tokens can still bind one to an existing pod by hand
-(`--bound-object-kind Pod`) and exchange it from anywhere; treat permission to create tokens as
+Nothing has to be registered per workload, so there is no operator and no custom resource; a new
+service account has an identity the moment it exists. That is every service account in the
+cluster except those of `kube-system`; narrow it with `with: { namespaces: [shop, ...] }`, or deny
+more with `deny_namespaces`.
+
+The provider requires `kubernetes.io/pod/name`, so it accepts only tokens bound to a pod running as
+that service account, which is what the kubelet projects. That stops a plain `kubectl create
+token`, but anyone allowed to create service account tokens can still bind one to an existing pod by
+hand (`--bound-object-kind Pod`) and exchange it from anywhere; treat permission to create tokens as
 permission to use the identity. The issuer also refuses tokens meant to live longer than an hour
-(`max_token_lifetime`), so such a token is short-lived.
+(plus 30 seconds), so such a token is short-lived.
 
 The issuer verifies tokens offline, against the cluster's published keys, so it does not notice when
 a pod is deleted: a token taken from a pod keeps working until it expires, at most an hour later.
@@ -47,13 +52,22 @@ kubectl -n spiffex create secret tls spiffex-issuer-tls --cert=tls.crt --key=tls
 kubectl apply -f deploy/kubernetes/issuer.yaml
 ```
 
+The settings are in the ConfigMap `spiffex-issuer`, mounted as a file. The state is in the ConfigMap
+`spiffex-state`, under the key `state.yaml`, which the issuer reads through the Kubernetes API with
+its own service account; a Role lets it get that one ConfigMap and nothing else. Edit the
+state in place, with `kubectl -n spiffex edit configmap spiffex-state`: both replicas take up a valid
+change within the reload interval, 10 seconds by default, and keep the state they have when the new
+one is invalid, logging why. Applying the manifests again would put the example state back.
+
 The certificate must be valid for `spiffex-issuer.spiffex.svc`; cert-manager can issue and renew it,
 and the issuer picks up renewals without a restart. The issuer reads the cluster's keys with its own
 service account token, which the default `system:service-account-issuer-discovery` binding allows;
-some distributions remove that binding, and then the issuer needs one of its own. Check the upstream
+some distributions remove that binding, and then the issuer needs one of its own. Check the origin's
 `issuer` against your cluster's (`kubectl get --raw /.well-known/openid-configuration`); managed
-clusters often use a public URL there, and then `discovery: true` without a bearer token is the
-simpler choice.
+clusters often use a public URL there.
+
+The settings refuse key fetches to private addresses, except to `kubernetes.default.svc.cluster.local`,
+so an origin cannot make the issuer reach other services inside the cluster.
 
 Both replicas sign with the keys in the Secret. Each keeps its own record of used client assertions,
 so with N replicas an intercepted assertion could be replayed up to N times within its lifetime of
@@ -74,7 +88,8 @@ kubectl apply -f deploy/kubernetes/workload.yaml
 
 The pod gets:
 
-- a projected service account token with the audience `spiffex`, which only the agent mounts;
+- a projected service account token with the audience
+  `https://spiffex-issuer.spiffex.svc/origins/cluster`, which only the agent mounts;
 - an in-memory volume for the socket, shared with the app container;
 - `SPIFFE_ENDPOINT_SOCKET=unix:///run/spiffex/agent.sock` in the app container;
 - a startup probe, `spiffex health`, so the app container starts only once the agent serves a trust
@@ -91,5 +106,5 @@ else.
 and three workloads from these manifests, and checks that two of them can authenticate to each other
 while the third, whose token carries the wrong audience, gets nothing. It also mints tokens by hand
 with `kubectl create token` and checks that the issuer refuses those not bound to a pod, and those
-bound to a pod but meant to live longer than the cap. It needs docker, kind, kubectl, openssl and
-Go.
+bound to a pod but meant to live longer than the cap, and that changes to the state ConfigMap are
+taken up while an invalid state is not. It needs docker, kind, kubectl, openssl and Go.

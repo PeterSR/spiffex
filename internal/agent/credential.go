@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"bytes"
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -10,11 +12,14 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+
+	"github.com/PeterSR/spiffex/internal/procgroup"
 )
 
 // Grant parameters, as in SPEC section 3.
@@ -23,6 +28,7 @@ const (
 	grantTokenExchange     = "urn:ietf:params:oauth:grant-type:token-exchange"
 	clientAssertionJWT     = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 	tokenTypeJWT           = "urn:ietf:params:oauth:token-type:jwt"
+	tokenTypeExec          = "urn:spiffex:token-type:exec"
 )
 
 // assertionLifetime is the lifetime of the client assertions the agent signs:
@@ -100,33 +106,113 @@ func (c PrivateKeyJWT) grantParams(issuerURL string, now time.Time) (url.Values,
 	}, nil
 }
 
-// SubjectTokenFile exchanges a token read from a file (SPEC section 3.3). The
-// file is read for every request, because the platforms that provide such
-// tokens (a Kubernetes projected service account token, for one) rotate them
-// in place.
-type SubjectTokenFile struct {
-	Path string
+// maxSubjectToken is the largest subject token the issuer accepts.
+const maxSubjectToken = 16 << 10
+
+// subjectTokenTimeout bounds a subject token command.
+const subjectTokenTimeout = 10 * time.Second
+
+// SubjectToken exchanges a proof the workload already has (SPEC section
+// 3.3), read for every request: from a file, which platforms such as
+// Kubernetes rotate in place, or from the output of a command, for proofs
+// that must be made fresh.
+type SubjectToken struct {
+	// File holds the proof.
+	File string
+	// Command, when set instead of File, is run without a shell, and its
+	// standard output, trimmed, is the proof. It inherits the agent's
+	// environment.
+	Command []string
+	// Origin names the exec origin the proof is for. It is empty for a JWT.
+	Origin string
 }
 
-func (c SubjectTokenFile) validate() error {
-	if c.Path == "" {
-		return errors.New("a subject token file is required")
+func (c SubjectToken) validate() error {
+	if (c.File == "") == (len(c.Command) == 0) {
+		return errors.New("give either a subject token file or a subject token command")
+	}
+	if len(c.Command) > 0 && c.Command[0] == "" {
+		return errors.New("the subject token command is empty")
 	}
 	return nil
 }
 
-func (c SubjectTokenFile) grantParams(string, time.Time) (url.Values, error) {
-	data, err := os.ReadFile(c.Path)
+func (c SubjectToken) grantParams(string, time.Time) (url.Values, error) {
+	token, err := c.read()
 	if err != nil {
-		return nil, fmt.Errorf("reading the subject token: %w", err)
+		return nil, err
 	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return nil, errors.New("the subject token file is empty")
-	}
-	return url.Values{
+	params := url.Values{
 		"grant_type":         {grantTokenExchange},
 		"subject_token":      {token},
 		"subject_token_type": {tokenTypeJWT},
-	}, nil
+	}
+	if c.Origin != "" {
+		params.Set("subject_token_type", tokenTypeExec)
+		params.Set("origin", c.Origin)
+	}
+	return params, nil
+}
+
+func (c SubjectToken) read() (string, error) {
+	var data []byte
+	var err error
+	if c.File != "" {
+		if data, err = os.ReadFile(c.File); err != nil {
+			return "", fmt.Errorf("reading the subject token: %w", err)
+		}
+	} else if data, err = runCommand(c.Command); err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(string(data))
+	switch {
+	case token == "":
+		return "", errors.New("the subject token is empty")
+	case len(token) > maxSubjectToken:
+		return "", fmt.Errorf("the subject token is larger than the %d bytes the issuer accepts", maxSubjectToken)
+	}
+	return token, nil
+}
+
+// runCommand runs a subject token command and returns its standard output.
+func runCommand(argv []string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), subjectTokenTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	stdout := &limitedBuffer{limit: maxSubjectToken}
+	stderr := &limitedBuffer{limit: 512}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = time.Second
+	// In a process group of its own, so that the timeout, and the command
+	// finishing, take whatever it started with it.
+	err := procgroup.Run(cmd)
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return nil, fmt.Errorf("the subject token command did not finish within %s", subjectTokenTimeout)
+	case err != nil:
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("the subject token command: %w: %q", err, msg)
+		}
+		return nil, fmt.Errorf("the subject token command: %w", err)
+	case stdout.over:
+		return nil, fmt.Errorf("the subject token command wrote more than the %d bytes the issuer accepts", maxSubjectToken)
+	}
+	return stdout.Bytes(), nil
+}
+
+// limitedBuffer keeps the first limit bytes written to it and drops the
+// rest.
+type limitedBuffer struct {
+	bytes.Buffer
+	limit int
+	over  bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	room := b.limit - b.Len()
+	if len(p) > room {
+		b.over = true
+	}
+	b.Buffer.Write(p[:max(0, min(room, len(p)))])
+	return len(p), nil
 }

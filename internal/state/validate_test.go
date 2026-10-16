@@ -199,6 +199,16 @@ providers:
 origins:
   a: { provider: p }
   b: { provider: p, with: { uri: "https://evil.example/k" } }`, "origins.b.with.uri", "sent to evil.example"},
+		{"bearer token to another path of the allowed host", `
+providers:
+  p: { proof: { jwt: { issuer: i, jwks_uri: "https://kubernetes.default.svc.cluster.local/api/v1/secrets", bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token, shared: false } } }
+origins:
+  a: { provider: p }`, "providers.p.proof.jwt.jwks_uri", "on /api/v1/secrets"},
+		{"bearer token with a query", `
+providers:
+  p: { proof: { jwt: { issuer: i, jwks_uri: "https://kubernetes.default.svc.cluster.local/openid/v1/jwks?x=1", bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token, shared: false } } }
+origins:
+  a: { provider: p }`, "providers.p.proof.jwt.jwks_uri", "do not allow"},
 		{"bearer token to the discovery issuer's host", `
 providers:
   p: { proof: { jwt: { issuer: "https://kubernetes.default.svc.cluster.local", discovery: true, bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token, shared: false } } }

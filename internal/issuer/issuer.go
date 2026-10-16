@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"slices"
@@ -22,6 +23,10 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
 	"github.com/PeterSR/spiffex/internal/keyset"
+	"github.com/PeterSR/spiffex/internal/policy"
+	"github.com/PeterSR/spiffex/internal/settings"
+	"github.com/PeterSR/spiffex/internal/state"
+	"github.com/PeterSR/spiffex/internal/verifier"
 )
 
 // Paths of the endpoints, relative to the issuer URL.
@@ -36,14 +41,19 @@ const (
 
 // Defaults for Config fields left zero.
 const (
-	DefaultTokenTTL        = 5 * time.Minute
-	DefaultActivationDelay = 30 * time.Minute
+	DefaultTokenTTL        = settings.DefaultTokenTTL
+	DefaultActivationDelay = settings.DefaultActivationDelay
 )
 
 // KeySource supplies the current signing keys and their sequence number.
 // keyset.Watcher implements it.
 type KeySource interface {
 	Current() (set *keyset.Set, sequence uint64, changed <-chan struct{})
+}
+
+// PolicySource supplies the state in service. policy.Policy implements it.
+type PolicySource interface {
+	Current() *policy.View
 }
 
 // Config configures an Issuer.
@@ -53,11 +63,17 @@ type Config struct {
 	URL         string
 	TrustDomain spiffeid.TrustDomain
 	Keys        KeySource
-	// Clients enables the client_credentials grant with private_key_jwt.
-	Clients ClientSource
-	// Exchanger enables the token exchange grant.
-	Exchanger Exchanger
-	// TokenTTL is the lifetime of issued JWT-SVIDs.
+	// Policy decides who gets which identity. It is consulted on every
+	// request.
+	Policy PolicySource
+	// Verifiers runs the verifiers of exec origins. Nil means a runner with
+	// the default limits.
+	Verifiers *verifier.Runner
+	// TrustedProxies are the peers whose X-Forwarded-For header says which
+	// client a request came from, for limiting how often a client may start
+	// verifiers.
+	TrustedProxies []netip.Prefix
+	// TokenTTL is the lifetime of issued JWT-SVIDs, at most an hour.
 	TokenTTL time.Duration
 	// ActivationDelay is how long a new key is published before it signs.
 	ActivationDelay time.Duration
@@ -92,16 +108,29 @@ func New(cfg Config) (*Issuer, error) {
 	if cfg.Keys == nil {
 		return nil, errors.New("a key source is required")
 	}
+	if cfg.Policy == nil {
+		return nil, errors.New("a policy is required")
+	}
+	if cfg.Verifiers == nil {
+		if cfg.Verifiers, err = verifier.NewRunner(verifier.Limits{
+			PerOrigin:           settings.DefaultVerifiersPerOrigin,
+			Total:               settings.DefaultVerifiersTotal,
+			PerAddressPerMinute: settings.DefaultPerAddressPerMinute,
+			PerAddressBurst:     settings.DefaultPerAddressBurst,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.TokenTTL == 0 {
 		cfg.TokenTTL = DefaultTokenTTL
 	}
-	if cfg.TokenTTL < 10*time.Second || cfg.TokenTTL > 24*time.Hour {
-		return nil, fmt.Errorf("token TTL %s is out of range (10s to 24h)", cfg.TokenTTL)
+	if cfg.TokenTTL < settings.MinTokenTTL || cfg.TokenTTL > settings.MaxTokenTTL {
+		return nil, fmt.Errorf("token TTL %s is out of range (%s to %s)", cfg.TokenTTL, settings.MinTokenTTL, settings.MaxTokenTTL)
 	}
 	if cfg.ActivationDelay == 0 {
 		cfg.ActivationDelay = DefaultActivationDelay
 	}
-	if cfg.ActivationDelay < 3*time.Second {
+	if cfg.ActivationDelay < settings.MinActivationDelay {
 		return nil, fmt.Errorf("activation delay %s is too short (at least 3s)", cfg.ActivationDelay)
 	}
 	if cfg.RefreshHint == 0 {
@@ -165,6 +194,10 @@ func (iss *Issuer) TrustDomain() spiffeid.TrustDomain { return iss.cfg.TrustDoma
 // TokenEndpoint returns the token endpoint URL.
 func (iss *Issuer) TokenEndpoint() string { return iss.cfg.URL + TokenPath }
 
+// ManagementEndpoint returns the management API's URL, which is also the
+// audience of management tokens (SPEC section 8.1).
+func (iss *Issuer) ManagementEndpoint() string { return state.ManagementAudience(iss.cfg.URL) }
+
 // Handler returns the HTTP handler serving every endpoint under the issuer
 // URL's path.
 func (iss *Issuer) Handler() http.Handler {
@@ -184,45 +217,23 @@ func (iss *Issuer) Handler() http.Handler {
 
 func (iss *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	set, _, _ := iss.cfg.Keys.Current()
+	// Both grants are always offered: whether any origin takes them depends
+	// on a state that can change at any time.
 	doc := map[string]any{
 		"issuer":                                iss.cfg.URL,
 		"jwks_uri":                              iss.cfg.URL + JWKSPath,
 		"token_endpoint":                        iss.TokenEndpoint(),
-		"grant_types_supported":                 iss.grantTypes(),
-		"token_endpoint_auth_methods_supported": iss.authMethods(),
-		"response_types_supported":              []string{"id_token"},
-		"subject_types_supported":               []string{"public"},
-		"id_token_signing_alg_values_supported": algorithms(set),
-		"claims_supported":                      []string{"iss", "sub", "aud", "exp", "iat", "jti"},
-		"spiffe_bundle_endpoint":                iss.cfg.URL + BundlePath,
-		"spiffe_trust_domain":                   iss.cfg.TrustDomain.Name(),
-	}
-	if iss.cfg.Clients != nil {
-		doc["token_endpoint_auth_signing_alg_values_supported"] = assertionAlgorithms
+		"grant_types_supported":                 []string{GrantClientCredentials, GrantTokenExchange},
+		"token_endpoint_auth_methods_supported": []string{"private_key_jwt", "none"},
+		"token_endpoint_auth_signing_alg_values_supported": assertionAlgorithms,
+		"response_types_supported":                         []string{"id_token"},
+		"subject_types_supported":                          []string{"public"},
+		"id_token_signing_alg_values_supported":            algorithms(set),
+		"claims_supported":                                 []string{"iss", "sub", "aud", "exp", "iat", "jti"},
+		"spiffe_bundle_endpoint":                           iss.cfg.URL + BundlePath,
+		"spiffe_trust_domain":                              iss.cfg.TrustDomain.Name(),
 	}
 	writeJSON(w, http.StatusOK, doc, iss.publicCache())
-}
-
-func (iss *Issuer) grantTypes() []string {
-	grants := []string{}
-	if iss.cfg.Clients != nil {
-		grants = append(grants, GrantClientCredentials)
-	}
-	if iss.cfg.Exchanger != nil {
-		grants = append(grants, GrantTokenExchange)
-	}
-	return grants
-}
-
-func (iss *Issuer) authMethods() []string {
-	methods := []string{}
-	if iss.cfg.Clients != nil {
-		methods = append(methods, "private_key_jwt")
-	}
-	if iss.cfg.Exchanger != nil {
-		methods = append(methods, "none")
-	}
-	return methods
 }
 
 func (iss *Issuer) handleJWKS(w http.ResponseWriter, _ *http.Request) {
@@ -261,7 +272,8 @@ func (iss *Issuer) Bundle() ([]byte, error) {
 	return b.Marshal()
 }
 
-// Mint signs a JWT-SVID for id with the given audiences.
+// Mint signs a JWT-SVID for id with the given audiences. A token for the
+// management endpoint lives at most five minutes.
 func (iss *Issuer) Mint(id spiffeid.ID, audiences []string) (token string, expires time.Time, err error) {
 	if !id.MemberOf(iss.cfg.TrustDomain) {
 		return "", time.Time{}, fmt.Errorf("%s is not in trust domain %s", id, iss.cfg.TrustDomain)
@@ -269,6 +281,10 @@ func (iss *Issuer) Mint(id spiffeid.ID, audiences []string) (token string, expir
 	audiences, err = iss.checkAudiences(audiences)
 	if err != nil {
 		return "", time.Time{}, err
+	}
+	ttl := iss.cfg.TokenTTL
+	if audiences[0] == iss.ManagementEndpoint() {
+		ttl = min(ttl, maxManagementTokenTTL)
 	}
 	now := iss.cfg.Now().Truncate(time.Second)
 	set, _, _ := iss.cfg.Keys.Current()
@@ -284,7 +300,7 @@ func (iss *Issuer) Mint(id spiffeid.ID, audiences []string) (token string, expir
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	expires = now.Add(iss.cfg.TokenTTL)
+	expires = now.Add(ttl)
 	claims := jwt.Claims{
 		Issuer:   iss.cfg.URL,
 		Subject:  id.String(),
@@ -300,9 +316,10 @@ func (iss *Issuer) Mint(id spiffeid.ID, audiences []string) (token string, expir
 	return token, expires, nil
 }
 
-// checkAudiences validates and deduplicates requested audiences. An audience
-// naming the issuer itself is refused so that a JWT-SVID can never pass for a
-// client assertion aimed at this issuer.
+// checkAudiences validates and deduplicates requested audiences (SPEC
+// section 3). An audience naming the issuer itself is refused so that a
+// JWT-SVID can never pass for a client assertion aimed at this issuer, and
+// the management endpoint only comes alone.
 func (iss *Issuer) checkAudiences(audiences []string) ([]string, error) {
 	if len(audiences) == 0 {
 		return nil, errInvalidRequest("audience is required")
@@ -321,6 +338,9 @@ func (iss *Issuer) checkAudiences(audiences []string) ([]string, error) {
 	}
 	if len(out) > MaxAudiences {
 		return nil, errInvalidRequest("at most %d audiences may be requested", MaxAudiences)
+	}
+	if len(out) > 1 && slices.Contains(out, iss.ManagementEndpoint()) {
+		return nil, errInvalidTarget
 	}
 	return out, nil
 }

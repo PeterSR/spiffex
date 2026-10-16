@@ -128,3 +128,24 @@ func TestExplainCommand(t *testing.T) {
 		t.Error("explain ran without a token")
 	}
 }
+
+// check reads the bearer token paths of the settings as the issuer does.
+func TestCheckBearerTokenPaths(t *testing.T) {
+	dir := t.TempDir()
+	settings := writeFile(t, dir, "settings.yaml", `
+issuer: https://issuer.example.org
+trust_domain: example.org
+bearer_token_files:
+  - { path: /etc/token, hosts: [idp.example], paths: [/keys] }
+`)
+	st := writeFile(t, dir, "state.yaml", `
+providers:
+  p: { proof: { jwt: { issuer: https://idp.example, jwks_uri: "https://idp.example/admin", bearer_token_file: /etc/token, shared: false } }, name: "{sub}" }
+origins:
+  a: { provider: p }
+`)
+	out, err := captureStdout(t, func() error { return runCheck(t.Context(), []string{"-settings", settings, st}) })
+	if err == nil || !strings.Contains(out, "on /admin") {
+		t.Errorf("check: %v\n%s", err, out)
+	}
+}

@@ -4,8 +4,8 @@
 #   Secret spiffex-signing-keys   key files made with: spiffex key add -dir <dir>
 #   Secret spiffex-issuer-tls     tls.crt and tls.key for spiffex-issuer.spiffex.svc
 #
-# Adjust trust_domain, and the upstream issuer if your cluster's service
-# account issuer differs (kubectl get --raw /.well-known/openid-configuration).
+# Adjust trust_domain, and the cluster origin's issuer if your cluster's
+# service account issuer differs (kubectl get --raw /.well-known/openid-configuration).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -23,27 +23,70 @@ metadata:
   name: spiffex-issuer
   namespace: spiffex
 data:
+  # The issuer's settings. They change only with a restart.
   issuer.yaml: |
     issuer: https://spiffex-issuer.spiffex.svc
     trust_domain: example.org
     keys_dir: /keys
-    upstreams:
-      - name: kubernetes
-        issuer: https://kubernetes.default.svc.cluster.local
-        audience: spiffex
-        jwks_uri: https://kubernetes.default.svc.cluster.local/openid/v1/jwks
-        # The issuer's own service account may read the cluster's JWKS through
-        # the default system:service-account-issuer-discovery binding, if the
-        # distribution keeps it.
-        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
-        shared: false
-        rules:
-          # Every service account in the cluster, but only with a token bound
-          # to a running pod. Add a match (on kubernetes.io/namespace, say) to
-          # narrow it.
-          - require: [kubernetes.io/pod/name]
-            spiffe_id: spiffe://example.org/ns/{kubernetes.io/namespace}/sa/{kubernetes.io/serviceaccount/name}
+    state:
+      configmap: { namespace: spiffex, name: spiffex-state }
+    # Keys are fetched only from public addresses, but for the cluster's own
+    # API server, which the kubernetes provider reads them from.
+    fetch:
+      refuse_private_addresses: true
+      allow_private_hosts: [kubernetes.default.svc.cluster.local]
+---
+# The issuer's state: who gets which identity. The issuer reads it through
+# the Kubernetes API and takes up changes while it runs. Apply it once; after
+# that, change it in place (kubectl edit), so that applying these manifests
+# again does not undo the changes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spiffex-state
+  namespace: spiffex
+data:
+  state.yaml: |
+    origins:
+      # Every service account in the cluster but those of kube-system, with a
+      # token bound to a running pod and projected for the audience
+      # https://spiffex-issuer.spiffex.svc/origins/cluster. A pod of service
+      # account billing in namespace shop is
+      # spiffe://example.org/cluster/ns/shop/sa/billing. Narrow it with
+      # namespaces: [shop, ...] under with.
+      cluster:
+        provider: kubernetes
+        with:
+          # The issuer reads the cluster's keys with its own service account
+          # token, which the default system:service-account-issuer-discovery
+          # binding allows, if the distribution keeps it.
+          issuer: https://kubernetes.default.svc.cluster.local
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spiffex-issuer
+  namespace: spiffex
+rules:
+  # Reading the state, and nothing else in the cluster.
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [spiffex-state]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spiffex-issuer
+  namespace: spiffex
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: spiffex-issuer
+subjects:
+  - kind: ServiceAccount
+    name: spiffex-issuer
+    namespace: spiffex
 ---
 apiVersion: apps/v1
 kind: Deployment

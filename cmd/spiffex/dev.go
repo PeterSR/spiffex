@@ -16,21 +16,34 @@ import (
 
 	"github.com/PeterSR/spiffex/internal/issuer"
 	"github.com/PeterSR/spiffex/internal/keyset"
+	"github.com/PeterSR/spiffex/internal/state"
 )
 
-var devConfig = template.Must(template.New("config").Parse(`# A local trust domain made by "spiffex dev". Not for production: the
+// devOrigin is the keys origin "spiffex dev" puts the workloads in.
+const devOrigin = "dev"
+
+var devSettings = template.Must(template.New("settings").Parse(`# A local trust domain made by "spiffex dev". Not for production: the
 # issuer serves plain HTTP and its signing key sits next to this file.
 issuer: {{.Issuer}}
 trust_domain: {{.TrustDomain}}
 keys_dir: keys
 token_ttl: 5m
 activation_delay: 30m
-clients:
+state:
+  file: state.yaml
+`))
+
+var devState = template.Must(template.New("state").Parse(`# The issuer's state: who gets which identity. The issuer rereads this file
+# while it runs. The origin {{.Origin}} takes workloads that hold a private key; each
+# member is one workload, with client id {{.Origin}}/<member>.
+origins:
+  {{.Origin}}:
+    provider: keys
+    members:
 {{- range .Workloads}}
-  - client_id: {{.Name}}
-    spiffe_id: {{.ID}}
-    public_keys:
-      - pem: |
+      {{.Name}}:
+        keys:
+          - |
 {{.PublicKey}}
 {{- end}}
 `))
@@ -65,7 +78,7 @@ func runDev(_ context.Context, args []string) error {
 	}
 	var names []string
 	for _, name := range strings.Split(*workloads, ",") {
-		if _, err := spiffeid.FromSegments(td, name); err != nil {
+		if _, err := spiffeid.FromSegments(td, devOrigin, name); err != nil {
 			return fmt.Errorf("workload %q: %w", name, err)
 		}
 		if slices.Contains(names, name) {
@@ -96,10 +109,10 @@ func runDev(_ context.Context, args []string) error {
 		return err
 	}
 
-	type workload struct{ Name, ID, PublicKey string }
+	type workload struct{ Name, ClientID, ID, PublicKey string }
 	var ws []workload
 	for _, name := range names {
-		id, err := spiffeid.FromSegments(td, name)
+		id, err := spiffeid.FromSegments(td, devOrigin, name)
 		if err != nil {
 			return fmt.Errorf("workload %q: %w", name, err)
 		}
@@ -114,19 +127,18 @@ func runDev(_ context.Context, args []string) error {
 		if err := writePublicKey(&pub, signer.Public()); err != nil {
 			return err
 		}
-		indented := "          " + strings.ReplaceAll(strings.TrimSpace(pub.String()), "\n", "\n          ")
-		ws = append(ws, workload{Name: name, ID: id.String(), PublicKey: indented})
+		indented := "            " + strings.ReplaceAll(strings.TrimSpace(pub.String()), "\n", "\n            ")
+		ws = append(ws, workload{Name: name, ClientID: devOrigin + "/" + name, ID: id.String(), PublicKey: indented})
 	}
 
-	f, err := os.OpenFile(filepath.Join(*dir, "issuer.yaml"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
+	if err := writeTemplate(filepath.Join(*dir, "issuer.yaml"), devSettings, map[string]any{"Issuer": issuerURL, "TrustDomain": td.Name()}); err != nil {
 		return err
 	}
-	if err := devConfig.Execute(f, map[string]any{"Issuer": issuerURL, "TrustDomain": td.Name(), "Workloads": ws}); err != nil {
-		f.Close()
+	statePath := filepath.Join(*dir, "state.yaml")
+	if err := writeTemplate(statePath, devState, map[string]any{"Origin": devOrigin, "Workloads": ws}); err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
+	if err := checkDevState(statePath, issuerURL, td); err != nil {
 		return err
 	}
 
@@ -143,12 +155,42 @@ Run the issuer:
 
 Run an agent for %[4]s, then point any SPIFFE library at it:
 
-  spiffex agent -issuer %[5]s -client-id %[4]s -key-file %[2]s/workloads/%[4]s.key -socket %[2]s/%[4]s.sock
+  spiffex agent -issuer %[5]s -client-id %[8]s -key-file %[2]s/workloads/%[4]s.key -socket %[2]s/%[4]s.sock
   export SPIFFE_ENDPOINT_SOCKET=unix://%[2]s/%[4]s.sock
 
 Or fetch a token for %[6]s to call %[4]s with, without an agent:
 
-  spiffex token -issuer %[5]s -client-id %[6]s -key-file %[2]s/workloads/%[6]s.key -audience %[7]s
-`, td.Name(), *dir, *listen, first.Name, issuerURL, second.Name, first.ID)
+  spiffex token -issuer %[5]s -client-id %[9]s -key-file %[2]s/workloads/%[6]s.key -audience %[7]s
+
+Workloads are members of the origin %[10]s in %[2]s/state.yaml, which the issuer rereads while it runs.
+`, td.Name(), *dir, *listen, first.Name, issuerURL, second.Name, first.ID, first.ClientID, second.ClientID, devOrigin)
+	return nil
+}
+
+func writeTemplate(path string, tmpl *template.Template, data any) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := tmpl.Execute(f, data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// checkDevState makes sure the state written is one the issuer accepts.
+func checkDevState(path, issuerURL string, td spiffeid.TrustDomain) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	st, err := state.ParseState(data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if err := state.Validate(st, state.DefaultSettings(issuerURL, td)).Err(); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
 	return nil
 }

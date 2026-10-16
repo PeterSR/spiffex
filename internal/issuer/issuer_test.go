@@ -21,9 +21,13 @@ import (
 	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
 
 	"github.com/PeterSR/spiffex/internal/keyset"
+	"github.com/PeterSR/spiffex/internal/policy"
+	"github.com/PeterSR/spiffex/internal/state"
 )
 
 var td = spiffeid.RequireTrustDomainFromString("example.org")
+
+var emptyPolicy = policy.New(policy.Options{Settings: state.DefaultSettings("https://issuer.example.org", td)})
 
 type staticKeys struct {
 	set *keyset.Set
@@ -54,6 +58,7 @@ func testIssuer(t *testing.T, path string, algs ...keyset.Algorithm) (*Issuer, *
 		URL:         srv.URL + path,
 		TrustDomain: td,
 		Keys:        staticKeys{set: set, seq: 7},
+		Policy:      emptyPolicy,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -308,7 +313,7 @@ func TestTokenShape(t *testing.T) {
 func TestMintRejectsBadAudiences(t *testing.T) {
 	iss, _ := testIssuer(t, "", keyset.ES256)
 	id := spiffeid.RequireFromPath(td, "/billing")
-	for _, auds := range [][]string{nil, {""}, {strings.Repeat("a", 513)}, {"a", "b", "c", "d", "e", "f"}, {iss.URL()}, {iss.TokenEndpoint()}} {
+	for _, auds := range [][]string{nil, {""}, {strings.Repeat("a", 513)}, {"a", "b", "c", "d", "e", "f"}, {iss.URL()}, {iss.TokenEndpoint()}, {iss.ManagementEndpoint(), "a"}} {
 		if _, _, err := iss.Mint(id, auds); err == nil {
 			t.Errorf("Mint(%q) succeeded, want an error", auds)
 		}
@@ -333,7 +338,7 @@ func TestMintRotation(t *testing.T) {
 	}
 	now := start.Add(24*time.Hour + 29*time.Minute)
 	iss, err := New(Config{
-		URL: "https://issuer.example.org", TrustDomain: td, Keys: staticKeys{set: set},
+		URL: "https://issuer.example.org", TrustDomain: td, Keys: staticKeys{set: set}, Policy: emptyPolicy,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return now },
 	})
 	if err != nil {
@@ -372,7 +377,7 @@ func TestConfigValidation(t *testing.T) {
 		return s
 	}()
 	base := func() Config {
-		return Config{URL: "https://issuer.example.org", TrustDomain: td, Keys: staticKeys{set: set}}
+		return Config{URL: "https://issuer.example.org", TrustDomain: td, Keys: staticKeys{set: set}, Policy: emptyPolicy}
 	}
 	cases := map[string]func(*Config){
 		"negative refresh hint":   func(c *Config) { c.RefreshHint = -5 * time.Second },
@@ -380,6 +385,8 @@ func TestConfigValidation(t *testing.T) {
 		"refresh hint too long":   func(c *Config) { c.RefreshHint = 11 * time.Minute },
 		"activation delay tiny":   func(c *Config) { c.ActivationDelay = time.Second },
 		"token TTL too short":     func(c *Config) { c.TokenTTL = time.Second },
+		"token TTL over an hour":  func(c *Config) { c.TokenTTL = time.Hour + time.Second },
+		"no policy":               func(c *Config) { c.Policy = nil },
 		"no keys":                 func(c *Config) { c.Keys = nil },
 		"no trust domain":         func(c *Config) { c.TrustDomain = spiffeid.TrustDomain{} },
 	}

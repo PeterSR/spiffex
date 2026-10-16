@@ -1,125 +1,196 @@
 # Configuration and operations
 
-## The issuer
+The issuer reads two things: its **settings**, a file only the operator changes, which take effect
+on restart; and its **state**, the origins, providers and grants of [SPEC.md section 6](../SPEC.md#6-state),
+which it rereads while it runs.
 
-The issuer reads one YAML file:
+## The settings file
 
 ```yaml
 issuer: https://issuer.example.org     # the issuer URL; tokens carry it as iss
 trust_domain: example.org
-keys_dir: /var/lib/spiffex/keys        # signing keys; relative paths are relative to this file
-token_ttl: 5m                          # lifetime of issued JWT-SVIDs (default 5m)
+keys_dir: /var/lib/spiffex/keys        # signing keys
+token_ttl: 5m                          # lifetime of issued JWT-SVIDs (default 5m, at most 1h)
 activation_delay: 30m                  # how long a new signing key is published before it signs (default 30m)
 
-clients:                               # workloads that prove themselves with a private key
-  - client_id: billing
-    spiffe_id: spiffe://example.org/billing
-    public_keys:
-      - file: billing.pub              # or inline:  - pem: |  -----BEGIN PUBLIC KEY----- ...
-    audiences: [spiffe://example.org/orders]   # optional: the only audiences billing may request
+state:                                 # where the state lives: exactly one of
+  file: /etc/spiffex/state.yaml        #   one YAML or JSON document
+  # dir: /etc/spiffex/state            #   a directory tree, one file per object
+  # configmap: { namespace: spiffex, name: spiffex-state }   # a Kubernetes ConfigMap
 
-upstreams:                             # issuers whose tokens workloads may exchange
-  - name: github
-    issuer: https://token.actions.githubusercontent.com
-    audience: https://issuer.example.org
-    discovery: true
-    shared: true
-    rules:
-      - match: {repository_owner_id: "1234567"}
-        spiffe_id: spiffe://example.org/ci/{repository_id}
+management: false                      # read, but the management API is not served yet
+
+# What the state may make the issuer do with files on its machine (SPEC section 5.2). Lists
+# left out keep their defaults, which allow exactly what the shipped kubernetes provider needs.
+readable_files:                        # may be named as jwks_file or ca_file
+  - /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+bearer_token_files:                    # may be named as bearer_token_file, each only for these hosts
+  - path: /var/run/secrets/kubernetes.io/serviceaccount/token
+    hosts: [kubernetes.default.svc.cluster.local]
+    paths: [/openid/v1/jwks, /.well-known/openid-configuration]   # optional: only these URL paths
+verifiers:                             # the exec verifiers installed; none by default
+  - [/usr/libexec/spiffex/aws-verifier, --partition, aws]
+
+fetch:
+  refuse_private_addresses: false      # refuse key fetches to loopback, link-local and private addresses
+  allow_private_hosts: []              # hosts exempt from that, such as kubernetes.default.svc.cluster.local
+
+verifier_limits:                       # bounds on exec verifiers (SPEC section 5.4)
+  per_origin: 4                        # running at once for one origin
+  total: 16                            # running at once in all
+  per_address_per_minute: 60           # how often one client address may start one
+  per_address_burst: 10                # and how many in a row
+verifier_user: { uid: 65533, gid: 65533 }   # optional: run verifiers as this user, without supplementary groups
+trusted_proxies: [10.0.0.0/8]          # optional: peers whose X-Forwarded-For names the client
 ```
 
-Run it with `spiffex issuer -config issuer.yaml`. It listens on `:8443`, serving TLS when given
-`-tls-cert` and `-tls-key`, and plain HTTP otherwise, for use behind a TLS-terminating proxy. The
-issuer URL must be what clients and verifiers actually reach, because it is compared byte for byte.
+Run the issuer with `spiffex issuer -config issuer.yaml`. Relative paths in `keys_dir` and `state`
+are relative to the settings file; the file lists must name absolute paths. Unknown fields are
+refused. The issuer listens on `:8443`, serving TLS when given `-tls-cert` and `-tls-key`, and plain
+HTTP otherwise, for use behind a TLS-terminating proxy, and reloads the TLS certificate when its
+files change. The issuer URL must be what clients and verifiers actually reach, because it is
+compared byte for byte.
 
-The `clients` list, and the public key files it refers to, are reread while the issuer runs (every
-`-reload-interval`, 10 seconds by default), so registering, rotating or removing a workload key
-needs no restart. A change is applied once the files have stayed the same for two checks in a row,
-so a file caught halfway through being written is not mistaken for the new configuration; still,
-replace the file atomically (write a new file and rename it over the old one, as a Kubernetes
-ConfigMap update does) where you can. A change to `upstreams` takes effect at the next restart,
-while client changes in the same edit apply at once. The other settings need a restart; a reload
-that changes them is refused and logged. The TLS certificate is reloaded when its files change.
+`refuse_private_addresses` checks the address actually connected to, after name resolution, and
+judges an IPv6 address that carries an IPv4 one (NAT64, 6to4, IPv4-compatible) by the latter. It
+then ignores any HTTP proxy, since a proxy would hide the destination. Hosts in
+`allow_private_hosts` are exempt, compared with the URL's host name; list
+`kubernetes.default.svc.cluster.local` there for the shipped `kubernetes` provider.
+
+`verifier_user` needs the issuer to run with the privilege to change user (CAP_SETUID and
+CAP_SETGID), and to kill processes of that user (CAP_KILL), or a hung verifier could never be
+stopped. The issuer checks this at startup, by starting a process as that user and killing it,
+and refuses to start when it cannot. `trusted_proxies` matters
+for the per-address verifier limit: behind a trusted proxy, the client is the rightmost address in
+`X-Forwarded-For` that is not itself a trusted proxy.
 
 Every flag of every command can also be set as an environment variable: `-reload-interval` is
 `SPIFFEX_RELOAD_INTERVAL`, and so on. The names are shared between commands, so `SPIFFEX_DIR` means
 `-dir` to every command that has one. A repeatable flag such as `-audience` takes a single value
 from the environment.
 
-## Registering a workload
+## The state
+
+The state starts out empty, and an empty state admits nobody. A state that does not exist yet is
+empty, too. The issuer checks the state every `-reload-interval` (10 seconds by default):
+
+- A valid new state is put in service as a whole; requests already running finish with the old one.
+- An invalid state is not. The issuer keeps serving the last valid state and logs the problems,
+  once for each version. At startup, an invalid state keeps the issuer from starting.
+- A state that disappears after one was loaded (a deleted file, directory or ConfigMap) is treated
+  the same way. To empty the issuer, store an empty document.
+- A file or directory is taken up once it has stayed the same for two checks in a row, so a file
+  caught halfway through being written is not mistaken for the new state. A ConfigMap changes as a
+  whole and is taken up at the next check.
+
+`spiffex check -settings issuer.yaml state.yaml` runs the same validation as the issuer, without
+one; `spiffex explain` shows how the state would treat a given subject token.
+
+In a **directory**, each object is a file of its own:
+
+```
+state/
+  origins/kube.yaml                 the origin kube, as under origins in the document
+  origins/vms.yaml
+  origins/vms/members/billing.pub   member billing of origin vms: one PEM block per key
+  origins/vms/members/orders.jwk    member orders: a JWK, or a JWK Set for several keys
+  providers/partner-idp.yaml
+  grants/operators.yaml
+```
+
+Files may end in `.yaml`, `.yml` or `.json`, names starting with a dot are ignored, and any other
+file is an error rather than silently left out. A member is given in its origin's file or as a file
+under `members`, not both, and two member files whose names differ only in case are an error. When
+the issuer writes a tree, it reads it back, and puts the previous one back if they differ.
+
+Whoever can write the stored state controls every identity: protect it like the signing keys.
+
+## Workloads with keys
+
+A `keys` origin lists workloads that hold a private key, each a member:
 
 ```bash
 spiffex key generate -out billing.key > billing.pub
 ```
 
-`billing.key` stays with the workload and nowhere else. `billing.pub` goes into the issuer's
-configuration. `-alg RS256` makes an RSA key instead of the default ECDSA P-256 key.
+```yaml
+origins:
+  vms:
+    provider: keys
+    members:
+      billing: { keys: ["-----BEGIN PUBLIC KEY-----\n..."] }
+```
 
-A workload can have several public keys registered at once, which is how its key is rotated: add the
-new public key, switch the workload to the new private key, then remove the old public key.
+`billing.key` stays with the workload and nowhere else. The workload's client id is
+`<origin>/<member>`, here `vms/billing`, and its SPIFFE ID `spiffe://example.org/vms/billing`. A
+member can have up to ten keys, which is how its key is rotated: add the new public key, switch the
+workload to the new private key, then remove the old public key. `-alg RS256` makes an RSA key
+instead of the default ECDSA P-256 key.
 
-## Token exchange
+## Tokens from other issuers
 
-An upstream lets workloads trade a token they already have for a JWT-SVID, with no key of their own
-registered at the issuer. The issuer verifies the token against the upstream's keys, then tries the
-rules in order; the first whose `match` claims all have the given values decides the SPIFFE ID.
+A `jwt` origin lets workloads trade a token they already have for a JWT-SVID. The shipped providers
+cover Kubernetes (`kubernetes`), GitHub Actions (`github`), GitLab (`gitlab`) and any public OIDC
+issuer (`oidc`); `spiffex provider list` and `spiffex provider show NAME` print them.
 
-| Field | |
-|---|---|
-| `name` | a label for logs |
-| `issuer` | the `iss` the upstream's tokens carry, compared exactly |
-| `audience` | the audience the tokens must carry: choose one used for nothing else |
-| `jwks_file`, `jwks_uri`, `discovery` | where the upstream's keys are: a file (reread when it changes), a URL, or the issuer's own OIDC discovery. Exactly one. |
-| `ca_file` | CA certificates to trust when fetching keys, instead of the system roots |
-| `bearer_token_file` | a token to send when fetching keys, read at each fetch, and sent only to the host of `jwks_uri` or `issuer`, never to one a discovery document names |
-| `shared` | whether anyone can get tokens from the upstream (GitHub Actions, a cloud provider). Required unless the keys come from a file. Well-known public issuers are always treated as shared. |
-| `max_token_lifetime` | refuse subject tokens issued to live longer than this (`exp` minus `iat`); 1h by default |
-| `rules` | `match`: claims and the exact values they must have; `require`: claims that must be present; `spiffe_id`: the template |
+```yaml
+origins:
+  ci:
+    provider: github
+    with: { owner_id: "1234567", refs: [refs/heads/main] }
+```
 
-For a shared upstream every rule needs a `match`, and it should be on a claim the upstream controls
-that names the owner, such as GitHub's `repository_owner_id`: spiffex cannot tell such a claim from
-one the token's holder chooses, like a branch name.
+A token reaches an origin by its `iss` and its audience. Unless the provider says otherwise, the
+audience is the **origin audience**: the issuer URL, `/origins` and the origin's prefix, here
+`https://issuer.example.org/origins/ci`. Ask the upstream for tokens with that audience.
 
-Claims inside objects are named by their path with `/`, so `kubernetes.io/namespace` is the
-`namespace` field of the `kubernetes.io` object. In `spiffe_id`, `{path}` is replaced by that
-claim's value. A placeholder must fill a whole path segment, and a token whose value for it is
-empty, `.`, `..`, or contains anything but letters, digits, `.`, `_` and `-` is refused rather than
-escaped, so no two tokens can map to the same identity by way of a crafted value. Only string and
-integer claims count, integers exactly as the token writes them; a claim holding a fraction, a
-boolean, an object or a list is treated as absent.
-
-Two upstreams whose rules produce the same SPIFFE IDs (two clusters with the same namespace and
-service account names, say) give their workloads the same identities. Give each upstream its own
-path prefix unless that is what you want; nothing warns about it.
-
-Keys fetched over the network are cached for ten minutes and fetched again early when a token names
-a key the cache lacks. When the upstream cannot be reached, the cached keys keep working for up to
-24 hours, after which exchanges fail until it is back.
+Fetched keys are cached for ten minutes and fetched again early when a token names a key the cache
+lacks, at most every 30 seconds. When the upstream cannot be reached, the cached keys keep working
+for up to 24 hours. Fetches use https, follow no redirects, and are limited to 1 MiB, 100 keys and
+15 seconds. A bearer token is sent only to a host its `bearer_token_files` entry allows, and with
+`discovery` only with the discovery request, never to the key location the discovery document names.
 
 For a Kubernetes cluster, see [kubernetes.md](kubernetes.md).
+
+## Proofs checked by a verifier
+
+An `exec` origin hands the proof to a local program, the verifier, which answers with claims
+(SPEC section 5.4). Only verifiers listed in the settings can be named by a provider, with exactly
+the same arguments. A verifier runs without a shell, with an empty environment, and with standard
+input, output and error only, in a process group of its own that is killed at its timeout and
+whenever it finishes. With verifiers installed, the issuer on Linux adopts and reaps whatever they
+leave behind, also as a container's init. It reads
+the request as JSON on standard input and must print one JSON object with a `claims` member.
+
+Workloads ask for such an origin by name: `-subject-token-type exec -origin aws` on the agent or
+`spiffex token`, or the form parameters `subject_token_type=urn:spiffex:token-type:exec` and
+`origin=aws`.
 
 ## The agent
 
 ```bash
 spiffex agent -issuer https://issuer.example.org \
-  -client-id billing -key-file billing.key \
+  -client-id vms/billing -key-file billing.key \
   -socket /run/spiffex/billing.sock
 ```
 
 | Flag | |
 |---|---|
 | `-issuer` | the issuer URL; `https` is required except on a loopback address |
-| `-client-id`, `-key-file` | the workload's registration, for `private_key_jwt` |
-| `-subject-token-file` | a token file to exchange instead, read again for every request |
+| `-client-id`, `-key-file` | the workload's member, `<origin>/<member>`, and its private key, for `private_key_jwt` |
+| `-subject-token-file` | a file holding a proof to exchange instead, read again for every request |
+| `-subject-token-command` | a command whose output is the proof, run without a shell for every request: words separated by spaces, or a JSON array. It inherits the agent's environment, runs in a process group of its own that goes when it finishes, and must finish within 10 seconds |
+| `-subject-token-type` | `jwt` (the default) or `exec` |
+| `-origin` | with `-subject-token-type exec`, the origin whose verifier checks the proof |
 | `-socket` | the Unix socket to serve the Workload API on |
 | `-socket-mode` | the socket's permissions, `0600` by default |
 | `-trust-domain` | refuse to start unless the issuer serves this trust domain |
 | `-ca-file` | CA certificates to trust for the issuer instead of the system roots, read at startup |
 | `-log-level` | `debug`, `info`, `warn` or `error` |
 
-`spiffex health -socket PATH` exits 0 once an agent serves a trust bundle on that socket, for a
-container startup or readiness probe.
+`spiffex token` takes the same proof flags and prints one JWT-SVID. `spiffex health -socket PATH`
+exits 0 once an agent serves a trust bundle on that socket, for a container startup or readiness
+probe.
 
 The agent retries discovery until the issuer answers, and exits when the answer shows it was
 misconfigured (a different issuer URL or trust domain).
@@ -142,11 +213,11 @@ spiffex key prune -config /etc/spiffex/issuer.yaml    # delete keys no token can
 ```
 
 `list` and `prune` must know the issuer's `activation_delay` and `token_ttl`, so they read the
-issuer's configuration file; without it, give `-dir`, `-activation-delay` and `-token-ttl`
-explicitly. With `-config`, the configuration file wins over any of those three set in the
-environment. `prune -dry-run` shows what would go. A key counts as retired once a newer key has been
-signing for `token_ttl` plus ten minutes, which covers clock skew and issuers reloading their keys
-directory every few minutes or more often.
+issuer's settings file; without it, give `-dir`, `-activation-delay` and `-token-ttl` explicitly.
+With `-config`, the settings file wins over any of those three set in the environment. `prune
+-dry-run` shows what would go. A key counts as retired once a newer key has been signing for
+`token_ttl` plus ten minutes, which covers clock skew and issuers reloading their keys directory
+every few minutes or more often.
 
 The activation delay gives verifiers time to fetch a new key before tokens signed with it appear.
 The issuer counts it from when a key arrived in its directory, not from the time in its file name,

@@ -1,8 +1,8 @@
 # A workload with the spiffex agent as a native sidecar (Kubernetes 1.29 or
-# newer). The agent exchanges the pod's service account token, projected with
-# the audience the issuer expects, for JWT-SVIDs; the app reaches the agent
-# through SPIFFE_ENDPOINT_SOCKET. This pod's SPIFFE ID is
-# spiffe://example.org/ns/shop/sa/billing.
+# newer). The agent exchanges the pod's service account token, projected for
+# the audience of the issuer's cluster origin, for JWT-SVIDs; the app reaches
+# the agent through SPIFFE_ENDPOINT_SOCKET. This pod's SPIFFE ID is
+# spiffe://example.org/cluster/ns/shop/sa/billing.
 #
 # The spiffex-ca ConfigMap holds the CA of the issuer's TLS certificate; leave
 # it and -ca-file out when that certificate comes from a public CA.
@@ -88,7 +88,7 @@ spec:
           projected:
             sources:
               - serviceAccountToken:
-                  audience: spiffex
+                  audience: https://spiffex-issuer.spiffex.svc/origins/cluster
                   expirationSeconds: 3600
                   path: token
         - name: spiffex-ca

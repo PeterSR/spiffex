@@ -76,6 +76,16 @@ func decodeChecked(tree any, schemaID string, out any) error {
 	return dec.Decode(out)
 }
 
+// DecodeTree reads one YAML document, JSON included, with the same rules as
+// ParseState, into the values JSON decoding would give. It is for storage
+// forms that assemble the state document from several files.
+func DecodeTree(data []byte) (any, error) {
+	if len(data) > MaxStateSize {
+		return nil, fmt.Errorf("the document is %d bytes, more than the %d allowed", len(data), MaxStateSize)
+	}
+	return decodeTree(data)
+}
+
 // decodeTree reads one YAML document, JSON included, into the values JSON
 // decoding would give, with numbers as json.Number. Only what JSON can say is
 // accepted: no anchors or aliases, which can make a small document expand

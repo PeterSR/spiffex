@@ -12,9 +12,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/PeterSR/spiffex/internal/config"
-	"github.com/PeterSR/spiffex/internal/issuer"
 	"github.com/PeterSR/spiffex/internal/keyset"
+	"github.com/PeterSR/spiffex/internal/settings"
 )
 
 func runKey(_ context.Context, args []string) error {
@@ -133,7 +132,7 @@ func keyAdd(args []string) error {
 
 // rotationFlags are the issuer settings that decide a signing key's state.
 // Guessing them wrong could prune a key the issuer still signs with, so they
-// come from the issuer's configuration file or must all be given.
+// come from the issuer's settings file or must all be given.
 type rotationFlags struct {
 	fs              *flag.FlagSet
 	config          *string
@@ -145,7 +144,7 @@ type rotationFlags struct {
 func addRotationFlags(fs *flag.FlagSet) rotationFlags {
 	return rotationFlags{
 		fs:              fs,
-		config:          fs.String("config", "", "the issuer's configuration file, to read keys_dir, activation_delay and token_ttl from"),
+		config:          fs.String("config", "", "the issuer's settings file, to read keys_dir, activation_delay and token_ttl from"),
 		dir:             fs.String("dir", "", "the issuer's keys directory, when not using -config"),
 		activationDelay: fs.Duration("activation-delay", 0, "the issuer's activation_delay, when not using -config"),
 		tokenTTL:        fs.Duration("token-ttl", 0, "the issuer's token_ttl, when not using -config"),
@@ -163,18 +162,11 @@ func (f rotationFlags) resolve() (dir string, delay, retention time.Duration, er
 		if given["dir"] || given["activation-delay"] || given["token-ttl"] {
 			return "", 0, 0, errors.New("-config already says what -dir, -activation-delay and -token-ttl would")
 		}
-		cfg, err := config.Load(*f.config)
+		s, err := settings.Load(*f.config)
 		if err != nil {
 			return "", 0, 0, err
 		}
-		dir, delay, ttl := cfg.KeysDir, cfg.ActivationDelay, cfg.TokenTTL
-		if delay == 0 {
-			delay = issuer.DefaultActivationDelay
-		}
-		if ttl == 0 {
-			ttl = issuer.DefaultTokenTTL
-		}
-		return dir, delay, ttl + 10*time.Minute, nil
+		return s.KeysDir, s.ActivationDelay, s.TokenTTL + 10*time.Minute, nil
 	}
 	if *f.dir == "" || *f.activationDelay <= 0 || *f.tokenTTL <= 0 {
 		return "", 0, 0, errors.New("give -config, or all of -dir, -activation-delay and -token-ttl as the issuer uses them")

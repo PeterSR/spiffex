@@ -1,202 +1,101 @@
-// Package exchange verifies tokens from upstream issuers (a Kubernetes
-// cluster, a CI provider, a cloud) and maps them to SPIFFE IDs, for the token
-// exchange grant (SPEC section 3.3).
+// Package exchange verifies subject tokens from upstream issuers (a
+// Kubernetes cluster, a CI provider, a cloud) against the keys of the jwt
+// origin they reach, for the token exchange grant (SPEC section 3.3). It
+// fetches those keys within the limits of SPEC section 5.2.
 package exchange
 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
-	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
+
+	"github.com/PeterSR/spiffex/internal/state"
 )
 
-// upstreamAlgorithms are the signature algorithms accepted on subject
-// tokens: asymmetric only, so a public JWKS can never verify an HMAC.
-var upstreamAlgorithms = []jose.SignatureAlgorithm{
+// Algorithms are the signature algorithms accepted on subject tokens:
+// asymmetric only, so a public key set can never verify an HMAC.
+var Algorithms = []jose.SignatureAlgorithm{
 	jose.RS256, jose.RS384, jose.RS512,
 	jose.PS256, jose.PS384, jose.PS512,
 	jose.ES256, jose.ES384, jose.ES512,
 	jose.EdDSA,
 }
 
-// clockSkew is tolerated on every time comparison against an upstream's clock.
-const clockSkew = 30 * time.Second
-
 // ErrRejected is wrapped by every error that means the subject token is not
-// acceptable, as opposed to the exchanger failing.
+// acceptable, as opposed to the issuer failing to decide.
 var ErrRejected = errors.New("subject token rejected")
 
 func rejected(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrRejected, fmt.Sprintf(format, args...))
 }
 
-// Upstream is one trusted token issuer and the rules that map its tokens to
-// SPIFFE IDs.
-type Upstream struct {
-	// Name labels the upstream in logs.
-	Name string
-	// Issuer is the iss claim the upstream's tokens carry, compared exactly.
-	Issuer string
-	// Audience must be one of the subject token's audiences.
-	Audience string
-	// Keys supplies the upstream's verification keys.
-	Keys KeySource
-	// MaxTokenLifetime, when set, refuses tokens whose exp lies further than
-	// this after their iat, and tokens without iat.
-	MaxTokenLifetime time.Duration
-	// Rules are tried in order; the first that matches decides the SPIFFE ID.
-	Rules []Rule
+// Token is a subject token parsed but not verified.
+type Token struct {
+	jws *jwt.JSONWebToken
+	// Issuer and Audience are the token's claims as it states them. They
+	// only choose the origin whose keys verify it.
+	Issuer   string
+	Audience []string
 }
 
-// KeySource supplies an upstream's public keys.
-type KeySource interface {
-	// Keys returns the current key set. kid is the key the token names, so an
-	// implementation can refresh when it does not know it.
-	Keys(ctx context.Context, kid string) (*jose.JSONWebKeySet, error)
-}
-
-// Rule maps tokens whose claims match to a SPIFFE ID.
-type Rule struct {
-	// Match lists claims that must have exactly these values. A claim path
-	// separates nested objects with "/", for example kubernetes.io/namespace.
-	// Only string and integer claims can match.
-	Match map[string]string
-	// Require lists claims that must be present with a non-empty string or
-	// integer value, whatever it is.
-	Require []string
-	// SPIFFEID is a template: each {claim/path} is replaced by that claim's
-	// value, which must be a single, plain path segment.
-	SPIFFEID string
-}
-
-// Exchanger verifies subject tokens against its upstreams.
-type Exchanger struct {
-	trustDomain spiffeid.TrustDomain
-	self        string
-	upstreams   map[string]Upstream
-	logger      *slog.Logger
-	now         func() time.Time
-}
-
-// New returns an Exchanger for the trust domain. self is the spiffex
-// issuer's own URL; its tokens are never accepted as subject tokens.
-func New(trustDomain spiffeid.TrustDomain, self string, upstreams []Upstream, logger *slog.Logger) (*Exchanger, error) {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	e := &Exchanger{trustDomain: trustDomain, self: self, upstreams: make(map[string]Upstream), logger: logger, now: time.Now}
-	for _, u := range upstreams {
-		if err := e.check(u); err != nil {
-			return nil, fmt.Errorf("upstream %s: %w", u.Name, err)
-		}
-		if _, dup := e.upstreams[u.Issuer]; dup {
-			return nil, fmt.Errorf("upstream %s: issuer %s is configured twice", u.Name, u.Issuer)
-		}
-		e.upstreams[u.Issuer] = u
-	}
-	return e, nil
-}
-
-func (e *Exchanger) check(u Upstream) error {
-	switch {
-	case u.Issuer == "":
-		return errors.New("issuer is required")
-	case u.Issuer == e.self:
-		return errors.New("the issuer cannot be its own upstream")
-	case u.Audience == "":
-		return errors.New("audience is required")
-	case u.Keys == nil:
-		return errors.New("a key source is required")
-	case len(u.Rules) == 0:
-		return errors.New("at least one rule is required")
-	}
-	for i, r := range u.Rules {
-		if err := checkTemplate(r.SPIFFEID, e.trustDomain); err != nil {
-			return fmt.Errorf("rules[%d]: %w", i, err)
-		}
-	}
-	return nil
-}
-
-// Exchange verifies a subject token and returns the SPIFFE ID it maps to.
-// An error wrapping ErrRejected means the token is not acceptable; any other
-// error means the exchanger could not decide (an upstream's keys could not be
-// fetched, for one).
-func (e *Exchanger) Exchange(ctx context.Context, subjectToken string) (spiffeid.ID, error) {
-	token, err := jwt.ParseSigned(subjectToken, upstreamAlgorithms)
-	if err != nil || len(token.Headers) != 1 {
-		return spiffeid.ID{}, rejected("not a signed JWT with an accepted algorithm")
-	}
-	// The issuer only picks the upstream to verify against; nothing is
-	// trusted until the signature checks out with that upstream's keys.
-	var unverified jwt.Claims
-	if err := token.UnsafeClaimsWithoutVerification(&unverified); err != nil {
-		return spiffeid.ID{}, rejected("malformed claims")
-	}
-	if unverified.Issuer == e.self {
-		return spiffeid.ID{}, rejected("tokens from this issuer cannot be exchanged")
-	}
-	u, ok := e.upstreams[unverified.Issuer]
-	if !ok {
-		return spiffeid.ID{}, rejected("issuer %q is not a configured upstream", unverified.Issuer)
-	}
-
-	keys, err := u.Keys.Keys(ctx, token.Headers[0].KeyID)
-	if err != nil {
-		return spiffeid.ID{}, fmt.Errorf("upstream %s: fetching keys: %w", u.Name, err)
+// Parse reads a subject token without verifying it.
+func Parse(raw string) (*Token, error) {
+	jws, err := jwt.ParseSigned(raw, Algorithms)
+	if err != nil || len(jws.Headers) != 1 {
+		return nil, rejected("not a JWT signed with an accepted algorithm")
 	}
 	var claims jwt.Claims
-	if err := verifyWith(token, keys, &claims); err != nil {
-		return spiffeid.ID{}, rejected("upstream %s: signature: %v", u.Name, err)
+	if err := jws.UnsafeClaimsWithoutVerification(&claims); err != nil {
+		return nil, rejected("malformed claims")
 	}
-	// Decoded again, now that the signature holds, keeping numbers exact.
-	all, err := numberPreservingClaims(token)
-	if err != nil {
-		return spiffeid.ID{}, rejected("upstream %s: %v", u.Name, err)
-	}
-	if claims.Expiry == nil {
-		return spiffeid.ID{}, rejected("upstream %s: exp is required", u.Name)
-	}
-	if u.MaxTokenLifetime > 0 {
-		if claims.IssuedAt == nil {
-			return spiffeid.ID{}, rejected("upstream %s: iat is required", u.Name)
-		}
-		if lifetime := claims.Expiry.Time().Sub(claims.IssuedAt.Time()); lifetime > u.MaxTokenLifetime {
-			return spiffeid.ID{}, rejected("upstream %s: token lifetime %s exceeds %s", u.Name, lifetime, u.MaxTokenLifetime)
-		}
-	}
-	if err := claims.ValidateWithLeeway(jwt.Expected{
-		Issuer:      u.Issuer,
-		AnyAudience: jwt.Audience{u.Audience},
-		Time:        e.now(),
-	}, clockSkew); err != nil {
-		return spiffeid.ID{}, rejected("upstream %s: %v", u.Name, err)
-	}
-
-	for _, r := range u.Rules {
-		if !matches(r.Match, all) || !present(r.Require, all) {
-			continue
-		}
-		id, err := render(r.SPIFFEID, all, e.trustDomain)
-		if err != nil {
-			return spiffeid.ID{}, rejected("upstream %s: %v", u.Name, err)
-		}
-		return id, nil
-	}
-	return spiffeid.ID{}, rejected("upstream %s: no rule matches the token", u.Name)
+	return &Token{jws: jws, Issuer: claims.Issuer, Audience: claims.Audience}, nil
 }
 
-// verifyWith checks the signature with the key the token names, or with each
-// key when it names none, and decodes the claims.
+// Verify checks the token's signature with the keys of the origin it
+// reached and its times (SPEC section 3.3, steps 3 and 4), and returns its
+// claims as state.DecodeClaims gives them. An error wrapping ErrRejected
+// refuses the token; any other means the keys could not be had.
+func (t *Token) Verify(ctx context.Context, origin *state.ExpandedJWT, keys KeySource, now time.Time) (map[string]any, error) {
+	header := t.jws.Headers[0]
+	set, err := keys.Keys(ctx, header.KeyID)
+	if err != nil {
+		return nil, fmt.Errorf("fetching the upstream's keys: %w", err)
+	}
+	var payload json.RawMessage
+	var times jwt.Claims
+	if err := verifyWith(t.jws, set, &payload, &times); err != nil {
+		return nil, rejected("signature: %v", err)
+	}
+	if times.Issuer != origin.Issuer || !slices.Contains(times.Audience, origin.Audience) {
+		return nil, rejected("the verified iss or aud does not fit the origin")
+	}
+	if times.Expiry == nil || times.IssuedAt == nil {
+		return nil, rejected("exp and iat are required")
+	}
+	if lifetime := times.Expiry.Time().Sub(times.IssuedAt.Time()); !origin.AllowsLifetime(lifetime) {
+		return nil, rejected("issued to live %s, longer than the %s (plus %s) the origin accepts", lifetime, origin.MaxTokenLifetime, state.ClockSkew)
+	}
+	if err := times.ValidateWithLeeway(jwt.Expected{Time: now}, state.ClockSkew); err != nil {
+		return nil, rejected("%v", err)
+	}
+	claims, err := state.DecodeClaims(payload)
+	if err != nil {
+		return nil, rejected("%v", err)
+	}
+	return claims, nil
+}
+
+// verifyWith checks the signature with the key the token names, or with
+// each key when it names none, and decodes the claims.
 func verifyWith(token *jwt.JSONWebToken, set *jose.JSONWebKeySet, out ...any) error {
 	keys := set.Keys
 	if kid := token.Headers[0].KeyID; kid != "" {
@@ -220,122 +119,66 @@ func verifyWith(token *jwt.JSONWebToken, set *jose.JSONWebKeySet, out ...any) er
 	return errors.New("no key verifies the token")
 }
 
-func numberPreservingClaims(token *jwt.JSONWebToken) (map[string]any, error) {
-	var raw json.RawMessage
-	if err := token.UnsafeClaimsWithoutVerification(&raw); err != nil {
-		return nil, err
+// UnverifiedIssuers returns the iss claims of anything shaped like a JWT,
+// whatever its algorithm and without checking its signature, for refusing
+// the issuer's own tokens before they go anywhere. It reads the compact
+// serialization and the JSON serializations of JWS (an object with a
+// payload member), with the payload in any base64 alphabet, padded or not.
+// A payload may name iss more than once, and parsers disagree on which one
+// counts, so every one is returned.
+func UnverifiedIssuers(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if strings.HasPrefix(trimmed, "{") {
+		var jws struct {
+			Payload string `json:"payload"`
+		}
+		if json.Unmarshal([]byte(trimmed), &jws) != nil {
+			return nil
+		}
+		return payloadIssuers(jws.Payload)
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var all map[string]any
-	if err := dec.Decode(&all); err != nil {
-		return nil, err
+	parts := strings.Split(trimmed, ".")
+	if len(parts) != 3 {
+		return nil
 	}
-	return all, nil
+	return payloadIssuers(parts[1])
 }
 
-var integer = regexp.MustCompile(`^-?[0-9]+$`)
-
-// claimAt returns the claim at a "/"-separated path as a string. Only strings
-// and integers count; an integer is returned exactly as the token wrote it.
-// Fractions, booleans, objects and lists are treated as absent, so that no
-// two different values can render the same.
-func claimAt(claims map[string]any, path string) (string, bool) {
-	var cur any = claims
-	for _, part := range strings.Split(path, "/") {
-		obj, ok := cur.(map[string]any)
-		if !ok {
-			return "", false
+func payloadIssuers(encoded string) []string {
+	payload, ok := decodeBase64(encoded)
+	if !ok {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil
+	}
+	var issuers []string
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return issuers
 		}
-		if cur, ok = obj[part]; !ok {
-			return "", false
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return issuers
+		}
+		var iss string
+		if key == "iss" && json.Unmarshal(value, &iss) == nil {
+			issuers = append(issuers, iss)
 		}
 	}
-	switch v := cur.(type) {
-	case string:
-		return v, true
-	case json.Number:
-		if integer.MatchString(v.String()) {
-			return v.String(), true
-		}
-	}
-	return "", false
+	return issuers
 }
 
-func present(paths []string, claims map[string]any) bool {
-	for _, path := range paths {
-		if v, ok := claimAt(claims, path); !ok || v == "" {
-			return false
+// decodeBase64 decodes base64 in the URL or the standard alphabet, with or
+// without padding.
+func decodeBase64(s string) ([]byte, bool) {
+	s = strings.TrimRight(s, "=")
+	for _, enc := range []*base64.Encoding{base64.RawURLEncoding, base64.RawStdEncoding} {
+		if data, err := enc.DecodeString(s); err == nil {
+			return data, true
 		}
 	}
-	return true
-}
-
-func matches(want map[string]string, claims map[string]any) bool {
-	for path, value := range want {
-		if got, ok := claimAt(claims, path); !ok || got != value {
-			return false
-		}
-	}
-	return true
-}
-
-var (
-	placeholder = regexp.MustCompile(`\{([^{}]+)\}`)
-	segment     = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-)
-
-// checkTemplate makes sure a template renders into the trust domain whatever
-// the claim values, by rendering it with a harmless value.
-func checkTemplate(tmpl string, td spiffeid.TrustDomain) error {
-	if strings.Count(tmpl, "{") != strings.Count(tmpl, "}") {
-		return fmt.Errorf("spiffe_id %q: unbalanced braces", tmpl)
-	}
-	sample := placeholder.ReplaceAllString(tmpl, "x")
-	id, err := spiffeid.FromString(sample)
-	if err != nil {
-		return fmt.Errorf("spiffe_id %q: %w", tmpl, err)
-	}
-	if !id.MemberOf(td) {
-		return fmt.Errorf("spiffe_id %q is not in trust domain %s", tmpl, td)
-	}
-	for _, m := range placeholder.FindAllStringIndex(tmpl, -1) {
-		before, after := tmpl[:m[0]], tmpl[m[1]:]
-		if !strings.HasSuffix(before, "/") || (after != "" && !strings.HasPrefix(after, "/")) {
-			return fmt.Errorf("spiffe_id %q: a placeholder must fill a whole path segment", tmpl)
-		}
-	}
-	return nil
-}
-
-// render fills a template. A claim value that is not a plain path segment is
-// refused, never escaped, so that two different tokens can never map to the
-// same SPIFFE ID by way of a crafted value.
-func render(tmpl string, claims map[string]any, td spiffeid.TrustDomain) (spiffeid.ID, error) {
-	var failure error
-	out := placeholder.ReplaceAllStringFunc(tmpl, func(m string) string {
-		path := m[1 : len(m)-1]
-		v, ok := claimAt(claims, path)
-		switch {
-		case !ok:
-			failure = fmt.Errorf("claim %s is missing, or not a string or integer", path)
-		case v == "." || v == ".." || !segment.MatchString(v):
-			failure = fmt.Errorf("claim %s has a value that is not a plain path segment", path)
-		}
-		return v
-	})
-	if failure != nil {
-		return spiffeid.ID{}, failure
-	}
-	if len(out) > 2048 {
-		return spiffeid.ID{}, errors.New("the SPIFFE ID would exceed 2048 bytes")
-	}
-	id, err := spiffeid.FromString(out)
-	if err != nil {
-		return spiffeid.ID{}, err
-	}
-	if !id.MemberOf(td) {
-		return spiffeid.ID{}, fmt.Errorf("%s is not in trust domain %s", id, td)
-	}
-	return id, nil
+	return nil, false
 }

@@ -41,15 +41,15 @@ With Go 1.26 or newer:
 ```bash
 git clone https://github.com/PeterSR/spiffex && cd spiffex && go build ./cmd/spiffex
 
-./spiffex dev -dir ./td                  # a local trust domain with two workloads, orders and billing
+./spiffex dev -dir ./td                  # a local trust domain with two workloads, dev/orders and dev/billing
 ./spiffex issuer -config ./td/issuer.yaml -listen 127.0.0.1:8443
 ```
 
 In another terminal, get a JWT-SVID for `billing` to call `orders` with:
 
 ```bash
-./spiffex token -issuer http://127.0.0.1:8443 -client-id billing -key-file ./td/workloads/billing.key \
-  -audience spiffe://spiffex.test/orders
+./spiffex token -issuer http://127.0.0.1:8443 -client-id dev/billing -key-file ./td/workloads/billing.key \
+  -audience spiffe://spiffex.test/dev/orders
 ```
 
 That is a plain OAuth 2.0 exchange. Workloads normally leave it to an agent and use a stock SPIFFE
@@ -57,13 +57,13 @@ library instead:
 
 ```bash
 ./spiffex agent -issuer http://127.0.0.1:8443 \
-  -client-id orders -key-file ./td/workloads/orders.key -socket ./td/orders.sock
+  -client-id dev/orders -key-file ./td/workloads/orders.key -socket ./td/orders.sock
 export SPIFFE_ENDPOINT_SOCKET=unix://$PWD/td/orders.sock
 ```
 
 ```go
 source, err := workloadapi.NewJWTSource(ctx)                // stock go-spiffe
-svid, err := source.FetchJWTSVID(ctx, jwtsvid.Params{Audience: "spiffe://spiffex.test/billing"})
+svid, err := source.FetchJWTSVID(ctx, jwtsvid.Params{Audience: "spiffe://spiffex.test/dev/billing"})
 req.Header.Set("Authorization", "Bearer "+svid.Marshal())
 ```
 
@@ -80,18 +80,18 @@ curl https://issuer.example.org/token \
   -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
   -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
   --data-urlencode subject_token@/var/run/secrets/spiffex/token \
-  -d audience=spiffe://example.org/ns/shop/sa/orders
+  -d audience=spiffe://example.org/cluster/ns/shop/sa/orders
 ```
 
 ## Running it
 
-- **[Configuration and operations](docs/configuration.md):** the issuer's configuration file,
-  registering workloads, the agent's flags, rotating signing keys.
+- **[Configuration and operations](docs/configuration.md):** the issuer's settings, its state of
+  origins and where it is kept, registering workloads, the agent's flags, rotating signing keys.
 - **[Kubernetes](docs/kubernetes.md):** pods prove themselves with their service account tokens, so
   nothing is registered per workload; the agent runs as a native sidecar.
-- **Proving identity:** with a private key per workload (`private_key_jwt`), or by exchanging a
-  token from an issuer the spiffex issuer trusts: a Kubernetes cluster, GitHub Actions, a cloud
-  provider.
+- **Proving identity:** with a private key per workload (`private_key_jwt`), by exchanging a
+  token from an issuer the spiffex issuer trusts (a Kubernetes cluster, GitHub Actions, a cloud
+  provider), or with any other proof a verifier program installed with the issuer can check.
 
 ## Relation to the SPIFFE standards
 

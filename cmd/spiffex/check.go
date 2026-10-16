@@ -10,9 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
-	"go.yaml.in/yaml/v3"
-
+	"github.com/PeterSR/spiffex/internal/settings"
 	"github.com/PeterSR/spiffex/internal/state"
 )
 
@@ -176,34 +174,18 @@ type settingsFlags struct {
 
 func addSettingsFlags(fs *flag.FlagSet) settingsFlags {
 	return settingsFlags{
-		file:        fs.String("settings", "", "a YAML file with the issuer's issuer, trust_domain, readable_files, bearer_token_files and verifiers; other fields are ignored"),
+		file:        fs.String("settings", "", "the issuer's settings file, for its issuer, trust_domain, readable_files, bearer_token_files and verifiers"),
 		issuer:      fs.String("issuer", "", "the issuer URL (required here or in -settings)"),
 		trustDomain: fs.String("trust-domain", "", "the trust domain (required here or in -settings)"),
 	}
 }
 
-// settingsFile is the part of an issuer settings file that validation reads.
-// Absent file lists keep the defaults; present ones replace them.
-type settingsFile struct {
-	Issuer           string    `yaml:"issuer"`
-	TrustDomain      string    `yaml:"trust_domain"`
-	ReadableFiles    *[]string `yaml:"readable_files"`
-	BearerTokenFiles *[]struct {
-		Path  string   `yaml:"path"`
-		Hosts []string `yaml:"hosts"`
-	} `yaml:"bearer_token_files"`
-	Verifiers [][]string `yaml:"verifiers"`
-}
-
 func (f settingsFlags) load() (state.Settings, error) {
-	var file settingsFile
+	file := &settings.File{}
 	if *f.file != "" {
-		data, err := os.ReadFile(*f.file)
-		if err != nil {
+		var err error
+		if file, err = settings.ReadFile(*f.file); err != nil {
 			return state.Settings{}, err
-		}
-		if err := yaml.Unmarshal(data, &file); err != nil {
-			return state.Settings{}, fmt.Errorf("%s: %w", *f.file, err)
 		}
 	}
 	if *f.issuer != "" {
@@ -215,26 +197,9 @@ func (f settingsFlags) load() (state.Settings, error) {
 	if file.Issuer == "" || file.TrustDomain == "" {
 		return state.Settings{}, usageError{errors.New("the issuer URL and trust domain are required: give -issuer and -trust-domain, or a -settings file with both")}
 	}
-	td, err := spiffeid.TrustDomainFromString(file.TrustDomain)
-	if err != nil {
-		return state.Settings{}, fmt.Errorf("trust domain: %w", err)
+	s, err := file.Validation()
+	if err != nil && *f.file != "" {
+		return state.Settings{}, fmt.Errorf("%s: %w", *f.file, err)
 	}
-	s := state.DefaultSettings(file.Issuer, td)
-	if file.ReadableFiles != nil {
-		s.ReadableFiles = *file.ReadableFiles
-	}
-	if file.BearerTokenFiles != nil {
-		s.BearerTokenFiles = nil
-		for i, b := range *file.BearerTokenFiles {
-			if b.Path == "" || len(b.Hosts) == 0 {
-				return state.Settings{}, fmt.Errorf("%s: bearer_token_files[%d]: want a path and at least one host", *f.file, i)
-			}
-			s.BearerTokenFiles = append(s.BearerTokenFiles, state.BearerTokenFile{Path: b.Path, Hosts: b.Hosts})
-		}
-	}
-	s.Verifiers = file.Verifiers
-	if err := s.Check(); err != nil {
-		return state.Settings{}, err
-	}
-	return s, nil
+	return s, err
 }
