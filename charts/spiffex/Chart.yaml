@@ -3,8 +3,8 @@ name: spiffex
 description: An OAuth 2.0 issuer of SPIFFE JWT-SVIDs, for workloads that prove themselves with keys or with tokens they already have
 type: application
 # The release workflow sets version and appVersion from the tag.
-version: 0.1.1
-appVersion: "0.1.1"
+version: 0.1.2
+appVersion: "0.1.2"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/PeterSR/spiffex
 sources:
