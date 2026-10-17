@@ -147,6 +147,9 @@ state:
           namespaces: [shop]
 ```
 
+Helm reads values as YAML 1.1, so a grant written into `state.content` needs its `on` key quoted as
+`"on"`; see the [chart README](../charts/spiffex/README.md#the-state-configmap).
+
 The release name `spiffex-issuer` gives the issuer URL `https://spiffex-issuer.spiffex.svc` used
 throughout this page. The state ConfigMap is then `spiffex-issuer-state`, and the first grant is
 written with `spiffex bootstrap` in an issuer pod as above. Instead of a TLS Secret, the chart can

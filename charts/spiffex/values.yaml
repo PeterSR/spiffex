@@ -73,7 +73,8 @@ state:
   # A ConfigMap you create and manage yourself, in the release namespace, holding state.yaml. When
   # set, the chart creates no state ConfigMap and the content below is not used.
   existingConfigMap: ""
-  # The state document to start with. Empty admits nobody.
+  # The state document to start with. Empty admits nobody. Quote the "on" key of a grant: Helm reads
+  # a bare on as the boolean true.
   content: {}
   #   origins:
   #     cluster:

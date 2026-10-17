@@ -7,6 +7,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The Helm chart refuses a grant in `state.content` whose `on` key is written bare. Helm reads YAML
+  1.1, where a bare `on` is the boolean true, so the state used to get a `"true"` key in its place
+  and the issuer refused it only when it started. The chart README says to quote it as `"on"`.
+
 ## [0.1.1] - 2026-10-16
 
 ### Added

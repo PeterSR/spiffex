@@ -7,6 +7,14 @@ Argo CD) lookup finds nothing, so the ConfigMap is always rendered; see README.m
 {{- if not .Values.state.existingConfigMap }}
 {{- $name := include "spiffex.stateConfigMap" . }}
 {{- if not (lookup "v1" "ConfigMap" .Release.Namespace $name) }}
+{{- $grants := (.Values.state.content | default dict).grants }}
+{{- if kindIs "map" $grants }}
+{{- range $grant, $g := $grants }}
+{{- if and (kindIs "map" $g) (hasKey $g "true") }}
+{{- fail (printf "state.content.grants.%s: write the on key as \"on\" (quoted); Helm reads values as YAML 1.1, where a bare on is the boolean true" $grant) }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

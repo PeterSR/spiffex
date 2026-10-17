@@ -212,6 +212,12 @@ Changing `state.content` after install therefore changes nothing; change the sta
 management API or `kubectl edit`. `helm rollback` to the install revision fails with `no ConfigMap
 with the name ... found` and leaves the state alone; roll back to a later revision instead.
 
+Helm reads values as YAML 1.1, where a bare `on` is the boolean true. Quote the `on` key of every
+grant in `state.content`, as in `"on": [/]`; the chart fails with a message naming the grant when
+one is left bare. Quote any other name or value that is `on`, `off`, `yes`, `no`, `y` or `n` too,
+since Helm silently turns those into booleans. A state written to a file or sent through the
+management API needs no quotes.
+
 To manage the ConfigMap entirely yourself, create it (with a `state.yaml` key, which may be `{}`)
 and set `state.existingConfigMap`. The chart then creates no state ConfigMap, and the Role names
 yours.

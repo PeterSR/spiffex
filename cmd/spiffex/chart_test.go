@@ -564,3 +564,45 @@ func TestChartExtraObjects(t *testing.T) {
 		}
 	}
 }
+
+// Helm reads values as YAML 1.1, so a grant's bare on: arrives as the key
+// "true". The chart must refuse it instead of writing a state the issuer
+// would reject when it starts.
+func TestChartBareOn(t *testing.T) {
+	helm := helmPath(t)
+	render := func(t *testing.T, key string, extra ...string) ([]k8sObject, error) {
+		values := filepath.Join(t.TempDir(), "values.yaml")
+		content := "trustDomain: example.org\nsigningKeys: {existingSecret: keys}\ntls: {existingSecret: tls}\n" +
+			"state:\n  content:\n    grants:\n      ops: {who: spiffe://example.org/ops/a, can: [read], " + key + ": [/]}\n"
+		if err := os.WriteFile(values, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return helmTemplate(t, helm, append([]string{"-f", values}, extra...)...)
+	}
+	t.Run("bare", func(t *testing.T) {
+		if _, err := render(t, "on"); err == nil || !strings.Contains(err.Error(), `state.content.grants.ops: write the on key as "on"`) {
+			t.Errorf("a bare on: rendered, or failed with another error: %v", err)
+		}
+	})
+	t.Run("quoted", func(t *testing.T) {
+		objects, err := render(t, `"on"`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st := find(objects, "ConfigMap", "spiffex-issuer-state"); st == nil || !strings.Contains(st.Data["state.yaml"], `"on":`) {
+			t.Fatalf("the quoted grant is missing from the state: %+v", st)
+		}
+		if err := checkRendered(t, objects); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Run("existing ConfigMap", func(t *testing.T) {
+		objects, err := render(t, "on", "--set", "state.existingConfigMap=mine")
+		if err != nil {
+			t.Fatalf("state.content is unused with an existing ConfigMap, yet rendering failed: %v", err)
+		}
+		if find(objects, "ConfigMap", "spiffex-issuer-state") != nil {
+			t.Error("a state ConfigMap was rendered next to an existing one")
+		}
+	})
+}
