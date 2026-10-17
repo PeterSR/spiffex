@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/PeterSR/spiffex/internal/nametemplate"
 )
 
 var (
@@ -27,28 +29,9 @@ func ValidName(s string) bool { return nameRE.MatchString(s) }
 // such as a member's name.
 func ValidSegment(s string) bool { return validSegment(s) }
 
-// validSegment reports whether s may be one segment of a SPIFFE ID path. It
-// is called for every path that permissions are checked on, so it loops
-// over bytes rather than running a regular expression.
-func validSegment(s string) bool {
-	if len(s) == 0 || len(s) > 255 || s == "." || s == ".." {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '.' || c == '_' || c == '-') {
-			return false
-		}
-	}
-	return true
-}
+func validSegment(s string) bool { return nametemplate.ValidSegment(s) }
 
-func checkSegment(s string) error {
-	if !validSegment(s) {
-		return fmt.Errorf("%q is not a path segment: want 1 to 255 characters from A-Z, a-z, 0-9, ., _ and -, other than . and .. alone", s)
-	}
-	return nil
-}
+func checkSegment(s string) error { return nametemplate.CheckSegment(s) }
 
 // splitPath splits a prefix or scope into its segments; / has none.
 func splitPath(p string) []string {

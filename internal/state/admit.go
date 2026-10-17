@@ -60,7 +60,7 @@ func (e *Expanded) admit(td spiffeid.TrustDomain, claims map[string]any) (spiffe
 			reasons = append(reasons, fmt.Sprintf("deny on %s: %q matches one of %s", c.Claim, v, quotePatterns(c.Patterns)))
 		}
 	}
-	name, nameReasons := e.Template.render(func(path string) (string, bool) { return ClaimValue(claims, path) })
+	name, nameReasons := renderName(e.Template, func(path string) (string, bool) { return ClaimValue(claims, path) })
 	reasons = append(reasons, nameReasons...)
 	if len(reasons) > 0 {
 		return spiffeid.ID{}, reasons
@@ -77,7 +77,7 @@ func (e *Expanded) MemberID(td spiffeid.TrustDomain, member string) (spiffeid.ID
 	if _, ok := e.Members[member]; !ok {
 		return spiffeid.ID{}, fmt.Errorf("origin %s has no member %s", e.Name, member)
 	}
-	name, reasons := e.Template.render(func(string) (string, bool) { return member, true })
+	name, reasons := renderName(e.Template, func(string) (string, bool) { return member, true })
 	if len(reasons) > 0 {
 		return spiffeid.ID{}, errors.New(strings.Join(reasons, "; "))
 	}

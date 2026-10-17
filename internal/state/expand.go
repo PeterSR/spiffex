@@ -241,7 +241,7 @@ func (x *expansion) expand(o *Origin, p *Provider) *Expanded {
 		e.Members = x.members(o)
 	}
 
-	if id := e.join(x.v.settings.TrustDomain.Name(), tmpl.sample()); len(id) > maxIDLength {
+	if id := e.join(x.v.settings.TrustDomain.Name(), tmpl.Shortest()); len(id) > maxIDLength {
 		x.originProblem(x.path, "its shortest SPIFFE ID, %s..., is %d bytes, more than the %d allowed", id[:64], len(id), maxIDLength)
 	}
 	if x.v.count() > start {

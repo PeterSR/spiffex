@@ -57,55 +57,6 @@ func TestParseTemplate(t *testing.T) {
 	}
 }
 
-func TestTemplateRender(t *testing.T) {
-	tests := []struct {
-		template string
-		value    string
-		want     string
-		ok       bool
-	}{
-		{"{v}", "dev", "dev", true},
-		{"{v|trim_prefix:customer-}", "customer-dev", "dev", true},
-		{"{v|trim_prefix:customer-}", "dev", "", false},
-		{"{v|trim_prefix:customer-}", "customer-", "", false},
-		{"{v|trim_prefix:customer-}", "customer-a/b", "", false},
-		{"{v|trim_prefix:customer-}", "customer-.", "", false},
-		{"{v|trim_suffix:-prod}", "shop-prod", "shop", true},
-		{"{v|trim_suffix:-prod}", "shop", "", false},
-		{"{v|trim_prefix:a-|trim_suffix:-z}", "a-m-z", "m", true},
-		{"{v|trim_prefix:a-|trim_suffix:-z}", "a-m", "", false},
-		{"{v|trim_prefix:a-|trim_prefix:a-}", "a-a-m", "m", true},
-		{"{v|trim_prefix:a-|trim_prefix:a-}", "a-m", "", false},
-		{"t/{v|trim_prefix:customer-}/backend", "customer-dev", "t/dev/backend", true},
-		{"{v|trim_suffix:-prod}", "..-prod", "", false},
-		{"{v|trim_suffix:-prod}", ".-prod", "", false},
-	}
-	for _, tt := range tests {
-		tmpl, err := ParseTemplate(tt.template, KindJWT)
-		if err != nil {
-			t.Fatalf("%q: %v", tt.template, err)
-		}
-		got, reasons := tmpl.render(func(string) (string, bool) { return tt.value, true })
-		if (len(reasons) == 0) != tt.ok {
-			t.Errorf("%q with %q: reasons = %v", tt.template, tt.value, reasons)
-			continue
-		}
-		if tt.ok && got != tt.want {
-			t.Errorf("%q with %q = %q, want %q", tt.template, tt.value, got, tt.want)
-		}
-	}
-}
-
-func TestTemplateSampleIgnoresOperations(t *testing.T) {
-	tmpl, err := ParseTemplate("a/{v|trim_prefix:long-prefix-}", KindJWT)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := tmpl.sample(); got != "a/x" {
-		t.Errorf("sample = %q, want a/x", got)
-	}
-}
-
 // One origin for every customer namespace, named without the namespace's
 // common prefix.
 func TestTemplateTrimAdmit(t *testing.T) {
@@ -147,26 +98,6 @@ origins:
 	wantProblem(t, bad, "origins.customers.name", "unknown operation")
 }
 
-func TestTemplateRenderReasons(t *testing.T) {
-	tests := []struct {
-		template, value, want string
-	}{
-		{"{v|trim_prefix:x}", "z", `claim v is "z", to which trim_prefix:x does not apply`},
-		{"{v|trim_prefix:x|trim_prefix:y}", "xz", `claim v is "xz", and trim_prefix:y does not apply to "z", what the operations before it left`},
-		{"{v|trim_prefix:x}", "x.", `claim v is "x.", which its operations make ".", not a valid path segment`},
-	}
-	for _, tt := range tests {
-		tmpl, err := ParseTemplate(tt.template, KindJWT)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, reasons := tmpl.render(func(string) (string, bool) { return tt.value, true })
-		if len(reasons) != 1 || reasons[0] != tt.want {
-			t.Errorf("%q with %q: reasons = %q, want %q", tt.template, tt.value, reasons, tt.want)
-		}
-	}
-}
-
 // An integer claim, as written in the token, can be trimmed like a string.
 func TestTemplateTrimIntegerClaim(t *testing.T) {
 	tmpl, err := ParseTemplate("{id|trim_prefix:6}", KindJWT)
@@ -177,15 +108,41 @@ func TestTemplateTrimIntegerClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, reasons := tmpl.render(func(path string) (string, bool) { return ClaimValue(claims, path) })
+	got, reasons := renderName(tmpl, func(path string) (string, bool) { return ClaimValue(claims, path) })
 	if len(reasons) > 0 || got != "00100200" {
 		t.Errorf("got %q, %v", got, reasons)
 	}
 }
 
 func TestKeysMemberTakesNoOperations(t *testing.T) {
-	_, err := ParseTemplate("{member|trim_prefix:a}", KindKeys)
-	if err == nil || !strings.Contains(err.Error(), "{member} takes no operations") {
-		t.Errorf("err = %v", err)
+	for _, tmpl := range []string{"{member|trim_prefix:a}", "{member|lower:x}", "{member|}", "{member|trim_prefix}"} {
+		_, err := ParseTemplate(tmpl, KindKeys)
+		if err == nil || !strings.Contains(err.Error(), "a keys origin's {member} takes no operations") {
+			t.Errorf("%q: err = %v", tmpl, err)
+		}
+	}
+}
+
+func TestRenderNameReasons(t *testing.T) {
+	tests := []struct {
+		template, want string
+		value          string
+		ok             bool
+	}{
+		{"{v}", `the name needs claim v, which is absent or neither a string nor an integer`, "", false},
+		{"{v}", `claim v is "a/b", which is not a valid path segment`, "a/b", true},
+		{"{v|trim_prefix:x}", `claim v is "z", to which trim_prefix:x does not apply`, "z", true},
+		{"{v|trim_prefix:x|trim_prefix:y}", `claim v is "xz", and trim_prefix:y does not apply to "z", what the operations before it left`, "xz", true},
+		{"{v|trim_prefix:x}", `claim v is "x.", which its operations make ".", not a valid path segment`, "x.", true},
+	}
+	for _, tt := range tests {
+		tmpl, err := ParseTemplate(tt.template, KindJWT)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, reasons := renderName(tmpl, func(string) (string, bool) { return tt.value, tt.ok })
+		if len(reasons) != 1 || reasons[0] != tt.want {
+			t.Errorf("%q with %q: reasons = %q, want %q", tt.template, tt.value, reasons, tt.want)
+		}
 	}
 }
