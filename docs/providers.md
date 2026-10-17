@@ -190,7 +190,22 @@ in which `*` stands for any run of characters; it must match the whole value.
 A **name template** is a `/`-separated list of literal segments and placeholders such as
 `{repository_id}`, each filling one whole segment of the SPIFFE ID with a claim's value. A value
 that is not a valid segment (letters, digits, `.`, `_` and `-`) refuses the token rather than being
-escaped. In a `keys` origin the only placeholder is `{member}`.
+escaped. In a `keys` origin the only placeholder is `{member}`. A placeholder can trim a fixed
+text off its value first, with `{<claim>|trim_prefix:<text>}` or `|trim_suffix:<text>`; a value
+without that text is refused, never passed through. These pods in the namespaces `team-a`,
+`team-b` and so on get `spiffe://<trust domain>/teams/a/api`, `/teams/b/api`:
+
+<!-- check: state -->
+```yaml
+origins:
+  teams:
+    provider: kubernetes
+    with:
+      namespaces: ["team-*"]
+    match:
+      kubernetes.io/serviceaccount/name: api
+    name: "{kubernetes.io/namespace|trim_prefix:team-}/api"
+```
 
 This origin narrows the `github` provider to tagged releases of one repository, and gives them one
 fixed identity under its own prefix:

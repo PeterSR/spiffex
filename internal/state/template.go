@@ -14,11 +14,24 @@ type Template []TemplatePart
 
 // TemplatePart is one segment of a template: either literal text, or a
 // placeholder filled with a claim's value (or, in a keys origin, the
-// member's name).
+// member's name), passed through its operations in order.
 type TemplatePart struct {
 	Literal     string
 	Placeholder string
+	Ops         []TemplateOp
 }
+
+// TemplateOp is one operation of a placeholder. Every operation is
+// one-to-one, so two different values never become the same segment.
+type TemplateOp struct {
+	Name string
+	Arg  string
+}
+
+const (
+	opTrimPrefix = "trim_prefix"
+	opTrimSuffix = "trim_suffix"
+)
 
 // ParseTemplate parses a name template for an origin of the given kind.
 // Placeholders are read first, since a claim path inside one may itself
@@ -37,13 +50,27 @@ func ParseTemplate(s string, kind Kind) (Template, error) {
 			if strings.Contains(inner, "{") {
 				return nil, fmt.Errorf("template %q: %q is not a single placeholder", s, part)
 			}
-			if kind == KindKeys && inner != memberPlaceholder {
+			path, opsText, hasOps := strings.Cut(inner, "|")
+			if kind == KindKeys && path != memberPlaceholder {
 				return nil, fmt.Errorf("template %q: a keys origin's only placeholder is {member}", s)
 			}
-			if err := checkClaimPath(inner); err != nil {
+			if kind == KindKeys && hasOps {
+				return nil, fmt.Errorf("template %q: a keys origin's {member} takes no operations", s)
+			}
+			if err := checkClaimPath(path); err != nil {
 				return nil, fmt.Errorf("template %q: %w", s, err)
 			}
-			t = append(t, TemplatePart{Placeholder: inner})
+			tp := TemplatePart{Placeholder: path}
+			if hasOps {
+				for _, opText := range strings.Split(opsText, "|") {
+					op, err := parseTemplateOp(opText)
+					if err != nil {
+						return nil, fmt.Errorf("template %q: %w", s, err)
+					}
+					tp.Ops = append(tp.Ops, op)
+				}
+			}
+			t = append(t, tp)
 		} else {
 			end := strings.IndexByte(rest, '/')
 			if end < 0 {
@@ -72,15 +99,57 @@ func ParseTemplate(s string, kind Kind) (Template, error) {
 	return t, nil
 }
 
+// parseTemplateOp parses one operation, written <name>:<argument>. The
+// argument takes only characters a segment may hold, so it never contains
+// the |, } or / that would end it.
+func parseTemplateOp(s string) (TemplateOp, error) {
+	name, arg, ok := strings.Cut(s, ":")
+	if !ok {
+		return TemplateOp{}, fmt.Errorf("operation %q: want <name>:<argument>", s)
+	}
+	if name != opTrimPrefix && name != opTrimSuffix {
+		return TemplateOp{}, fmt.Errorf("operation %q: unknown operation %q; the operations are %s and %s", s, name, opTrimPrefix, opTrimSuffix)
+	}
+	if !segmentText(arg) {
+		return TemplateOp{}, fmt.Errorf("operation %q: the argument must be 1 to 255 characters from A-Z, a-z, 0-9, ., _ and -", s)
+	}
+	return TemplateOp{Name: name, Arg: arg}, nil
+}
+
+// segmentText reports whether s is 1 to 255 characters a segment may hold.
+// Unlike a segment, it may be . or .. alone.
+func segmentText(s string) bool {
+	return s == "." || s == ".." || validSegment(s)
+}
+
+// apply runs the operation on v. A trim whose text is not there refuses the
+// value rather than passing it through, or the values x and <prefix>x would
+// both become x.
+func (op TemplateOp) apply(v string) (string, bool) {
+	switch op.Name {
+	case opTrimPrefix:
+		return strings.CutPrefix(v, op.Arg)
+	case opTrimSuffix:
+		return strings.CutSuffix(v, op.Arg)
+	}
+	return "", false
+}
+
+func (op TemplateOp) String() string { return op.Name + ":" + op.Arg }
+
 // String returns the template as written.
 func (t Template) String() string {
 	parts := make([]string, len(t))
 	for i, p := range t {
-		if p.Placeholder != "" {
-			parts[i] = "{" + p.Placeholder + "}"
-		} else {
+		if p.Placeholder == "" {
 			parts[i] = p.Literal
+			continue
 		}
+		parts[i] = "{" + p.Placeholder
+		for _, op := range p.Ops {
+			parts[i] += "|" + op.String()
+		}
+		parts[i] += "}"
 	}
 	return strings.Join(parts, "/")
 }
@@ -96,10 +165,27 @@ func (t Template) render(lookup func(placeholder string) (string, bool)) (string
 			parts[i] = p.Literal
 			continue
 		}
-		v, ok := lookup(p.Placeholder)
+		raw, ok := lookup(p.Placeholder)
+		if !ok {
+			reasons = append(reasons, fmt.Sprintf("the name needs claim %s, which is absent or neither a string nor an integer", p.Placeholder))
+			continue
+		}
+		v := raw
+		for j, op := range p.Ops {
+			before := v
+			if v, ok = op.apply(v); !ok {
+				if j == 0 {
+					reasons = append(reasons, fmt.Sprintf("claim %s is %q, to which %s does not apply", p.Placeholder, raw, op))
+				} else {
+					reasons = append(reasons, fmt.Sprintf("claim %s is %q, and %s does not apply to %q, what the operations before it left", p.Placeholder, raw, op, before))
+				}
+				break
+			}
+		}
 		switch {
 		case !ok:
-			reasons = append(reasons, fmt.Sprintf("the name needs claim %s, which is absent or neither a string nor an integer", p.Placeholder))
+		case !validSegment(v) && len(p.Ops) > 0:
+			reasons = append(reasons, fmt.Sprintf("claim %s is %q, which its operations make %q, not a valid path segment", p.Placeholder, raw, v))
 		case !validSegment(v):
 			reasons = append(reasons, fmt.Sprintf("claim %s is %q, which is not a valid path segment", p.Placeholder, v))
 		}
@@ -108,9 +194,16 @@ func (t Template) render(lookup func(placeholder string) (string, bool)) (string
 	return strings.Join(parts, "/"), reasons
 }
 
-// sample renders the template with the shortest possible values, for
+// sample fills the template with the shortest possible segments, for
 // checking the length of the IDs it can produce.
 func (t Template) sample() string {
-	name, _ := t.render(func(string) (string, bool) { return "x", true })
-	return name
+	parts := make([]string, len(t))
+	for i, p := range t {
+		if p.Placeholder == "" {
+			parts[i] = p.Literal
+		} else {
+			parts[i] = "x"
+		}
+	}
+	return strings.Join(parts, "/")
 }

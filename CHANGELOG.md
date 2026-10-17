@@ -7,6 +7,19 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Name template placeholders take operations: `{<claim>|trim_prefix:<text>}` and
+  `|trim_suffix:<text>` cut a fixed text off a claim's value before it fills the segment, so one
+  origin can name the pods of the namespaces `team-a`, `team-b` and so on `teams/a`, `teams/b`. A
+  value without that text is refused, so two values never get the same SPIFFE ID (SPEC section
+  4.1).
+
+### Changed
+
+- Inside a name template placeholder, the claim path now ends at the first `|`. A template whose
+  claim path contained `|` is now refused, or read as one with operations.
+
 ### Fixed
 
 - The Helm chart refuses a grant in `state.content` whose `on` key is written bare. Helm reads YAML

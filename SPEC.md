@@ -305,8 +305,26 @@ segment, or a single placeholder `{...}` that fills one whole segment:
   token, or of the claims the verifier returned (section 4.3);
 - in a `keys` origin, `{member}` is the member's name, and is the only placeholder.
 
-A placeholder's value MUST be a valid segment, or the request is rejected; it is never escaped or
-rewritten. The resulting SPIFFE ID MUST NOT exceed 2048 bytes. Keeping it within 255 characters is
+In a `jwt` or `exec` origin, a placeholder MAY list **operations** after its claim path, each
+written `|<operation>:<argument>`, as in `{kubernetes.io/namespace|trim_prefix:team-}`. Within a
+placeholder the claim path ends at the first `|` or `}`, so a claim whose name contains either
+cannot fill a placeholder. The operations apply to the claim's value in the order written:
+
+| Operation | Result |
+|---|---|
+| `trim_prefix:<text>` | the value without `<text>` at its start |
+| `trim_suffix:<text>` | the value without `<text>` at its end |
+
+The argument is 1 to 255 characters from `A-Z a-z 0-9 . _ -`. When the value does not start, or
+end, with the argument, the request is rejected; the value is never passed through unchanged, or
+`team-a` and `a` would both become `a`. Every operation is one-to-one in this way, so a template
+with operations never gives two different values the same SPIFFE ID. An unknown operation makes
+the template invalid.
+
+A placeholder's value, after its operations, MUST be a valid segment, or the request is rejected;
+it is never escaped or rewritten by any means other than its operations.
+
+The resulting SPIFFE ID MUST NOT exceed 2048 bytes. Keeping it within 255 characters is
 RECOMMENDED, the limit AWS places on federated subjects.
 
 A `keys` origin whose template has no `{member}` gives all its members the same SPIFFE ID. That is
@@ -329,7 +347,9 @@ member of the `kubernetes.io` object. As in a JSON Pointer ([RFC 6901]), `~1` in
 `/` and `~0` for `~`, so `oidc.circleci.com~1project-id` is the top-level claim
 `oidc.circleci.com/project-id`. Any other `~` is an error. A
 claim's **value** is its string value, or an integer exactly as written in the token; any other JSON
-value, and an empty string, count as absent. Claim paths mean the same in `require`, `match`, `deny` and name templates.
+value, and an empty string, count as absent. Claim paths mean the same in `require`, `match`,
+`deny` and name templates, except that in a name template a claim path ends at the first `|` or `}`
+(section 4.1).
 
 A `jwt` or `exec` origin admits a verified proof when:
 
