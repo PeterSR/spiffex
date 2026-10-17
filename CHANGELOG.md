@@ -7,6 +7,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3-rc.1] - 2026-10-17
+
 ### Changed
 
 - The repository is public. This is the first release signed with cosign and carrying build
@@ -119,7 +121,8 @@ The first version: an issuer, an agent and the `spiffex` command, following vers
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
 
-[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.1.3-rc.1...HEAD
+[0.1.3-rc.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.3-rc.1
 [0.1.2]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.2
 [0.1.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.1
 [0.1.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.0
