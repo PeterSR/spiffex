@@ -60,7 +60,7 @@ grants:
     can: [write]
     on: [/apps/staging]
   customer-admins:
-    who: spiffe://example.org/customers/acme/**    # one or more segments after /customers/acme
+    who: spiffe://example.org/customers/acme/**  # one or more segments after /customers/acme
     can: [read, write]
     on: [/customers/acme]
 ```

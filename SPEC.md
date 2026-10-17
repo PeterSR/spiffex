@@ -638,7 +638,7 @@ origins:
 providers:
   partner-idp: { ... }        # section 5
 grants:
-  controller: { ... }     # section 8.2
+  controller: { ... }         # section 8.2
 ```
 
 The document is the unit of change. An issuer MUST apply a new state as a whole or not at all, so

@@ -17,9 +17,9 @@ Signing is keyless: cosign signs with a short-lived certificate for the workflow
 identity, recorded in the public Sigstore transparency log. There are no signing keys to keep.
 
 **A release from a private repository is unsigned and has no attestations**: the workflow skips
-both, with a warning, so that the transparency log does not name a private repository. v0.1.0-rc.1
-is such a release. Signatures and attestations start with the first release after the repository
-goes public.
+both, with a warning, so that the transparency log does not name a private repository. 0.1.0-rc.1
+to 0.1.2 were released that way, before the repository went public; 0.1.3 is the first signed
+release.
 
 ## Versions and tags
 

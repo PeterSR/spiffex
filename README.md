@@ -78,8 +78,9 @@ Each release, listed on [the releases page](https://github.com/PeterSR/spiffex/r
   describe its values; [deploy/kubernetes](deploy/kubernetes) has plain manifests for clusters
   without Helm.
 
-Releases made after the repository went public are signed with cosign and carry build
-provenance; releases made while it is private are unsigned. With Go 1.26 or newer,
+Releases from 0.1.3 on are signed with cosign and carry build provenance. 0.1.0-rc.1 to 0.1.2
+were made before the repository went public: their tags are here, their images and charts are on
+ghcr.io, and they are unsigned. With Go 1.26 or newer,
 `go install github.com/PeterSR/spiffex/cmd/spiffex@latest` builds from source.
 
 ## Try it
@@ -157,8 +158,8 @@ kubectl -n shop exec deploy/billing -c spiffex-agent -- /spiffex token \
 ## Status
 
 Early development. The [specification](SPEC.md) is a draft at version 0, and breaking changes are
-possible until version 1. The first release is 0.1.0; [CHANGELOG.md](CHANGELOG.md) lists
-the changes and [RELEASING.md](RELEASING.md) how releases are made and verified.
+possible until version 1. [CHANGELOG.md](CHANGELOG.md) lists the changes and
+[RELEASING.md](RELEASING.md) how releases are made and verified.
 
 ## Contributing and security
 
