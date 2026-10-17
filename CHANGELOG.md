@@ -7,6 +7,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The repository is public. This is the first release signed with cosign and carrying build
+  provenance; 0.1.0-rc.1 to 0.1.2 were released before the repository went public and are
+  unsigned.
+
 ## [0.1.2] - 2026-10-17
 
 ### Added
