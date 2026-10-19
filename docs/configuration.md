@@ -246,8 +246,9 @@ Workloads find the agent through `SPIFFE_ENDPOINT_SOCKET=unix:///run/spiffex/bil
 who can connect to the socket gets the workload's identity, so keep it private to the workload: a
 directory only its user can enter, or a volume shared only between its containers.
 
-Use your SPIFFE library's JWT parts. The agent does not serve X.509-SVIDs, and the X.509 and
-combined bundle sources of go-spiffe and py-spiffe wait for them until they time out.
+Use your SPIFFE library's JWT parts. The agent does not serve X.509-SVIDs yet (the specification
+describes them in sections 2.5, 3.4 and 9, but this release does not implement them), and the X.509
+and combined bundle sources of go-spiffe and py-spiffe wait for them until they time out.
 
 ## Rotating signing keys
 

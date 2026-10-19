@@ -181,6 +181,7 @@ The provider gives the origin its proof, its name template (`name`) and its admi
 | `name` | a name template in place of the provider's |
 | `require`, `match`, `deny` | more admission rules; they apply on top of the provider's, so an origin can narrow its provider but never widen it |
 | `audiences` | patterns of the audiences its identities may request, in place of the provider's default |
+| `svid_types` | the kinds of SVID its identities may obtain, a non-empty list of `jwt` and `x509` (SPEC section 4.5), in place of the provider's default; when absent, `[jwt]` for an origin with an audience restriction (the provider's default does not apply to it), otherwise the provider's default or `[jwt, x509]`. Only `jwt` is enforced so far, since no X.509-SVIDs are issued yet |
 | `members` | for a `keys` provider, the members |
 
 A **claim path** names a claim: `sub`, or `kubernetes.io/namespace` for the `namespace` member of
@@ -265,7 +266,7 @@ A provider has these fields:
 | `description` | text for humans |
 | `params` | the parameters an origin fills in: each with `type: string` or `type: list`, and either `required: true` or a `default` |
 | `proof` | exactly one of `jwt`, `keys: {}` or `exec` |
-| `require`, `match`, `deny`, `name`, `audiences` | as for an origin, above |
+| `require`, `match`, `deny`, `name`, `audiences`, `svid_types` | as for an origin, above |
 | `overrides` | `true` when it takes the place of a shipped provider of the same name |
 
 The `jwt` proof:

@@ -55,7 +55,7 @@ const (
 	// maxSubjectToken bounds a subject token (SPEC section 3.3).
 	maxSubjectToken = 16 << 10
 	// maxManagementTokenTTL is the longest a token for the management
-	// endpoint may live (SPEC section 7).
+	// endpoint may live (SPEC section 7.1).
 	maxManagementTokenTTL = 5 * time.Minute
 )
 
@@ -98,6 +98,7 @@ var errClientAuth = &oauthError{http.StatusUnauthorized, "invalid_client", "clie
 var errSubjectToken = errInvalidRequest("subject token rejected")
 
 var errInvalidTarget = &oauthError{http.StatusBadRequest, "invalid_target", "audience not permitted"}
+var errSVIDTypeNotPermitted = &oauthError{http.StatusBadRequest, "invalid_target", "the origin does not issue this kind of SVID"}
 
 type tokenResponse struct {
 	AccessToken     string `json:"access_token"`
@@ -146,10 +147,10 @@ func (iss *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}, "no-store")
 }
 
-// authorizeTokenRequest authenticates the caller, then checks the audiences
-// it asks for. Audiences are checked only after authentication, so that a
-// refused audience tells nothing to someone who could not authenticate
-// (SPEC section 3.1).
+// authorizeTokenRequest authenticates the caller, then checks the kind of
+// SVID and the audiences it asks for. Both are checked only after
+// authentication, so that a refusal tells nothing to someone who could not
+// authenticate (SPEC section 3.1).
 func (iss *Issuer) authorizeTokenRequest(r *http.Request) (*grant, error) {
 	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct != "application/x-www-form-urlencoded" {
 		return nil, errInvalidRequest("content type must be application/x-www-form-urlencoded")
@@ -188,6 +189,9 @@ func (iss *Issuer) authorizeTokenRequest(r *http.Request) (*grant, error) {
 	}
 	if g.audiences, err = iss.checkAudiences(form["audience"]); err != nil {
 		return nil, err
+	}
+	if !g.origin.AllowsSVIDType("jwt") {
+		return nil, errSVIDTypeNotPermitted
 	}
 	for _, aud := range g.audiences {
 		if !g.origin.AllowsAudience(aud) {

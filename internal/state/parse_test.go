@@ -63,6 +63,13 @@ func TestParseStateRefuses(t *testing.T) {
 		{"empty audience pattern", `origins: { a: { provider: kubernetes, audiences: [""] } }`, "origins.a.audiences[0]", "minLength"},
 		{"bad tilde in a claim path", "origins: { a: { provider: kubernetes, require: [a~2b] } }", "origins.a.require[0]", "does not match pattern"},
 		{"grants is now delegate", `grants: { g: { who: "spiffe://example.org/a", can: [grants], on: [/] } }`, "grants.g.can[0]", "value must be one of"},
+		{"empty svid_types", "origins: { a: { provider: keys, svid_types: [] } }", "origins.a.svid_types", "minItems"},
+		{"unknown svid type", "origins: { a: { provider: keys, svid_types: [saml] } }", "origins.a.svid_types[0]", "value must be one of"},
+		{"repeated svid type", "origins: { a: { provider: keys, svid_types: [jwt, jwt] } }", "origins.a.svid_types", "are equal"},
+		{"svid_types not a list", "origins: { a: { provider: keys, svid_types: x509 } }", "origins.a.svid_types", "want array"},
+		{"empty provider svid_types", "providers: { p: { proof: { keys: {} }, svid_types: [] } }", "providers.p.svid_types", "minItems"},
+		{"unknown provider svid type", "providers: { p: { proof: { keys: {} }, svid_types: [x509, x500] } }", "providers.p.svid_types[1]", "value must be one of"},
+		{"repeated provider svid type", "providers: { p: { proof: { keys: {} }, svid_types: [x509, x509] } }", "providers.p.svid_types", "are equal"},
 		{"match on a dotted claim", "origins: { a: { provider: kubernetes, match: { kubernetes.io/namespace: [] } } }", `origins.a.match["kubernetes.io/namespace"]`, "minItems"},
 	}
 	for _, tt := range tests {
@@ -76,6 +83,29 @@ func TestParseStateRefuses(t *testing.T) {
 				t.Errorf("want a problem at %q containing %q, got:\n%v", tt.path, tt.msg, problems)
 			}
 		})
+	}
+}
+
+func TestParseSVIDTypes(t *testing.T) {
+	doc := `
+origins:
+  a: { provider: p, svid_types: [x509] }
+  b: { provider: p }
+providers:
+  p: { proof: { keys: {} }, svid_types: [jwt, x509] }
+`
+	st, err := ParseState([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Origins["a"].SVIDTypes; len(got) != 1 || got[0] != "x509" {
+		t.Errorf("origin svid_types = %v", got)
+	}
+	if got := st.Origins["b"].SVIDTypes; got != nil {
+		t.Errorf("an origin without svid_types has %v", got)
+	}
+	if got := st.Providers["p"].SVIDTypes; len(got) != 2 || got[0] != "jwt" || got[1] != "x509" {
+		t.Errorf("provider svid_types = %v", got)
 	}
 }
 

@@ -7,6 +7,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The specification describes X.509-SVIDs: a certificate authority next to the JWT signing keys
+  (SPEC section 2.5), X.509 authorities in the SPIFFE bundle (section 2.3), token requests that take
+  a `requested_token_type` and a `csr` (section 3.4), `svid_types` on origins and providers to
+  choose which kinds of SVID an origin issues (section 4.5), and a complete Workload API server in
+  the agent (section 9). Nothing of this is implemented yet; the state accepts and checks the new
+  `svid_types` field on origins and providers, and the token endpoint refuses a JWT-SVID to an
+  origin whose list lacks `jwt` (`invalid_target`, after authentication).
+
 ## [0.1.3] - 2026-10-19
 
 ### Changed

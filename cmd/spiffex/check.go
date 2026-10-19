@@ -150,6 +150,9 @@ func printReports(w io.Writer, reports []namedReport) error {
 		for _, name := range nr.report.Overrides {
 			fmt.Fprintf(w, "%snote: provider %s overrides the shipped provider of that name\n", prefix, name)
 		}
+		for _, name := range nr.report.X509UnderRestriction() {
+			fmt.Fprintf(w, "%swarning: origin %s lists x509 and has an audience restriction, which does not cover its X.509-SVIDs\n", prefix, name)
+		}
 		if len(nr.report.Skipped) > 0 {
 			fmt.Fprintf(w, "%sskipped: %s\n", prefix, strings.Join(nr.report.Skipped, "; "))
 		}

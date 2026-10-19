@@ -58,6 +58,12 @@ func TestCheck(t *testing.T) {
 		t.Errorf("unparsable state: %v\n%s", err, out)
 	}
 
+	loud := writeFile(t, dir, "loud.yaml", "origins:\n  a: { provider: keys, audiences: [orders], svid_types: [jwt, x509] }\n")
+	out, err = captureStdout(t, func() error { return runCheck(t.Context(), append(issuerFlags, loud)) })
+	if err != nil || out != "warning: origin a lists x509 and has an audience restriction, which does not cover its X.509-SVIDs\n" {
+		t.Errorf("x509 under a restriction: %v\n%s", err, out)
+	}
+
 	if err := runCheck(t.Context(), []string{valid}); err == nil {
 		t.Error("check ran without an issuer and trust domain")
 	}

@@ -31,6 +31,11 @@ type Origin struct {
 	Match     map[string]Strings `json:"match,omitempty"`
 	Deny      map[string]Strings `json:"deny,omitempty"`
 	Audiences *Strings           `json:"audiences,omitempty"`
+	// SVIDTypes are the kinds of SVID the origin's identities may obtain,
+	// jwt and x509 (SPEC section 4.5). Nil takes the default; an empty
+	// list is invalid, which omitzero (unlike omitempty) keeps visible to
+	// the schema.
+	SVIDTypes []string           `json:"svid_types,omitzero"`
 	Members   map[string]*Member `json:"members,omitempty"`
 }
 
@@ -52,6 +57,8 @@ type Provider struct {
 	Deny        map[string]Strings `json:"deny,omitempty"`
 	Name        string             `json:"name,omitempty"`
 	Audiences   *Strings           `json:"audiences,omitempty"`
+	// SVIDTypes is the default for the origin's svid_types (SPEC section 4.5).
+	SVIDTypes []string `json:"svid_types,omitzero"`
 }
 
 // ParamType is the type of a provider parameter.

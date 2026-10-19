@@ -157,6 +157,11 @@ func (p *Policy) apply(snap *store.Snapshot) error {
 	view := p.compile(snap.Version, snap.State, report, prev)
 	p.current.Store(view)
 	p.generation++
+	for _, name := range report.X509UnderRestriction() {
+		if e := prev.expanded[name]; e == nil || e.Audiences == nil || !e.AllowsSVIDType("x509") {
+			p.opts.Logger.Warn("an origin with an audience restriction lists x509, whose X.509-SVIDs the restriction does not cover", "origin", name)
+		}
+	}
 	for _, name := range report.Overrides {
 		p.opts.Logger.Warn("a provider in the state overrides the shipped provider of that name", "provider", name)
 	}

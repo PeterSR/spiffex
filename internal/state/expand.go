@@ -51,6 +51,9 @@ type Expanded struct {
 	// Audiences restricts the audiences identities may request. Nil means
 	// no restriction.
 	Audiences []Pattern
+	// SVIDTypes are the kinds of SVID the origin's identities may obtain
+	// (SPEC section 4.5), never empty.
+	SVIDTypes []string
 	// JWT is set for a jwt origin.
 	JWT *ExpandedJWT
 	// Exec is set for an exec origin.
@@ -104,6 +107,27 @@ type ExpandedExec struct {
 	// Params are the origin's parameter values, defaults included. The
 	// verifier receives them as data (SPEC section 5.4).
 	Params map[string]Strings
+}
+
+// EffectiveSVIDTypes returns the kinds of SVID an origin's identities may
+// obtain (SPEC section 4.5). While an audience restriction is in effect, the
+// provider's list does not apply: only the origin's own list can add x509.
+func EffectiveSVIDTypes(origin, provider []string, restricted bool) []string {
+	switch {
+	case len(origin) > 0:
+		return slices.Clone(origin)
+	case restricted:
+		return []string{"jwt"}
+	case len(provider) > 0:
+		return slices.Clone(provider)
+	}
+	return []string{"jwt", "x509"}
+}
+
+// AllowsSVIDType reports whether the origin's identities may obtain an SVID
+// of the type, jwt or x509.
+func (e *Expanded) AllowsSVIDType(t string) bool {
+	return slices.Contains(e.SVIDTypes, t)
 }
 
 // OriginAudience returns the default audience of a jwt origin: the issuer
@@ -228,6 +252,8 @@ func (x *expansion) expand(o *Origin, p *Provider) *Expanded {
 	} else if p.Audiences != nil {
 		e.Audiences = toPatterns(sub.list(p.Audiences, checkPattern))
 	}
+
+	e.SVIDTypes = EffectiveSVIDTypes(o.SVIDTypes, p.SVIDTypes, e.Audiences != nil)
 
 	if kind != KindKeys && len(o.Members) > 0 {
 		x.originProblem(field(x.path, "members"), "only a keys origin has members, and this is a %s origin", kind)
