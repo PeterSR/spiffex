@@ -108,9 +108,10 @@ Configure these once, in the repository's settings:
 
 ## Verifying a release
 
-You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.4 or newer. The
-signatures name the release workflow on a version tag of this repository. Set `VERSION` to the
-release you are checking:
+You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.1 or newer;
+cosign 2 reports "no signatures found" for the image and the chart. The signatures name the
+release workflow on a version tag of this repository. Set `VERSION` to the release you are
+checking:
 
 ```bash
 VERSION=X.Y.Z
