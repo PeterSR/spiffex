@@ -169,6 +169,16 @@ func (f *tokenFixture) verifyX509(t *testing.T, resp response, wantID string, ke
 
 func publicKeyEqual(a, b crypto.PublicKey) bool { return sameKey(a, b) }
 
+// With a root the issuer holds, the answer is the leaf alone: the root is the
+// anchor and is never sent (an intermediate gets two certificates, below).
+func TestX509ChainOfARootCAIsTheLeaf(t *testing.T) {
+	f := newX509Fixture(t)
+	resp := f.post(t, f.x509Form(t, "vms/billing", enc(csrDER(t, newKey(t), nil))))
+	if chain := x509Chain(t, resp); len(chain) != 1 {
+		t.Fatalf("chain of %d certificates, want the leaf alone", len(chain))
+	}
+}
+
 // A certificate comes out of every origin kind and both grants, and every
 // one of them verifies with go-spiffe.
 func TestX509SVIDFromEachOriginKind(t *testing.T) {

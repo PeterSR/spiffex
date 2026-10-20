@@ -1,6 +1,7 @@
 package issuer
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -214,6 +215,10 @@ func (iss *Issuer) issueX509(w http.ResponseWriter, g *grant) {
 func (iss *Issuer) respondX509(w http.ResponseWriter, g *grant, choice ca.Choice, leaf *x509.Certificate) {
 	chain := slices.Clone(leaf.Raw)
 	for _, c := range choice.CA.Chain {
+		// A root the issuer holds is its own Chain; the anchor is never sent.
+		if choice.CA.Anchor != nil && bytes.Equal(c.Raw, choice.CA.Anchor.Raw) {
+			continue
+		}
 		chain = append(chain, c.Raw...)
 	}
 	iss.cfg.Logger.Info("issued X.509-SVID", AuditAttr, "serial", hex.EncodeToString(leaf.SerialNumber.Bytes()), "spiffe_id", g.id,
