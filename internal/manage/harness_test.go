@@ -39,9 +39,16 @@ var td = spiffeid.RequireTrustDomainFromString("example.org")
 // It is never run: nothing here exchanges a proof with it.
 const verifierCommand = "/opt/spiffex/verifier"
 
-type staticKeys struct{ set *keyset.Set }
+// liveKeys is a key source a test can change under a running issuer.
+type liveKeys struct{ set atomic.Pointer[keyset.Set] }
 
-func (k staticKeys) Current() (*keyset.Set, uint64, <-chan struct{}) { return k.set, 1, nil }
+func newLiveKeys(set *keyset.Set) *liveKeys {
+	k := &liveKeys{}
+	k.set.Store(set)
+	return k
+}
+
+func (k *liveKeys) Current() (*keyset.Set, uint64, <-chan struct{}) { return k.set.Load(), 1, nil }
 
 // syncBuffer is a log destination tests can read while the server writes.
 type syncBuffer struct {
@@ -72,6 +79,7 @@ type harness struct {
 	store  store.Store
 	policy *policy.Policy
 	keys   *keyset.Set
+	source *liveKeys
 	logs   *syncBuffer
 	// memberKey is the private key of every member of every keys origin
 	// the harness writes.
@@ -99,7 +107,7 @@ func newHarness(t *testing.T, s store.Store, initial stateFunc) *harness {
 	srv := httptest.NewUnstartedServer(nil)
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-	h := &harness{t: t, url: srv.URL, srv: srv, store: s, keys: set, logs: &syncBuffer{}, memberKey: memberKey}
+	h := &harness{t: t, url: srv.URL, srv: srv, store: s, keys: set, source: newLiveKeys(set), logs: &syncBuffer{}, memberKey: memberKey}
 
 	settings := state.DefaultSettings(srv.URL, td)
 	settings.Verifiers = [][]string{{verifierCommand}}
@@ -129,7 +137,7 @@ func newHarness(t *testing.T, s store.Store, initial stateFunc) *harness {
 	if err := h.policy.Apply(snap); err != nil {
 		t.Fatal(err)
 	}
-	h.server, err = New(Config{Settings: settings, Store: s, Keys: staticKeys{set}, Policy: h.policy, Logger: logger,
+	h.server, err = New(Config{Settings: settings, Store: s, Keys: h.source, Policy: h.policy, Logger: logger,
 		RequestsPerSecond: 1000, RequestBurst: 1000})
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +145,7 @@ func newHarness(t *testing.T, s store.Store, initial stateFunc) *harness {
 	h.iss, err = issuer.New(issuer.Config{
 		URL:         srv.URL,
 		TrustDomain: td,
-		Keys:        staticKeys{set},
+		Keys:        h.source,
 		Policy:      h.policy,
 		Management:  h.server,
 		Logger:      logger,

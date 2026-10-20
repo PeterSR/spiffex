@@ -12,6 +12,18 @@ An upstream token reaches an origin when it carries the origin audience
 so a pod's projected service account token for an origin named "cluster" needs
   {{ $issuer }}/origins/cluster
 
+{{- if .Values.ca.existingSecret }}
+
+X.509-SVIDs: the issuer has a certificate authority, from Secret {{ .Values.ca.existingSecret }} mounted at /ca
+{{- if .Values.ca.roots.configMap }}, with the roots in ConfigMap {{ .Values.ca.roots.configMap }}
+{{- else if .Values.ca.roots.secret }}, with the roots in Secret {{ .Values.ca.roots.secret }}
+{{- end }}. The issuer rereads them while it runs, so replace the Secret as a
+whole to rotate; the rules are in docs/configuration.md.
+{{- else }}
+
+No certificate authority (ca.existingSecret): the issuer issues JWT-SVIDs only.
+{{- end }}
+
 The state is in ConfigMap {{ include "spiffex.stateConfigMap" . }}.
 {{- if not .Values.state.existingConfigMap }} The chart wrote it on install
 and leaves it alone from now on; helm uninstall keeps it.

@@ -29,24 +29,27 @@ case $INSTALL in
   *) echo "INSTALL is manifests or helm, not $INSTALL" >&2; exit 2 ;;
 esac
 WORK="$(mktemp -d)"
+# Our own kubeconfig, so the run never touches the user's contexts.
+export KUBECONFIG="$WORK/kubeconfig"
 TD=example.org
 ISSUER=https://spiffex-issuer.spiffex.svc
 ORIGIN_AUD=$ISSUER/origins/cluster
 
 cleanup() {
-  rm -rf "$WORK"
   if [ -z "${KEEP:-}" ]; then
-    kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+    kind delete cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null 2>&1 || true
     docker image rm spiffex:e2e spiffex-e2e-client:e2e >/dev/null 2>&1 || true
+    rm -rf "$WORK"
+  else
+    echo "KEEP set: cluster $CLUSTER is kept; its kubeconfig is $KUBECONFIG"
   fi
 }
 trap cleanup EXIT
 
 echo "== cluster"
 # Always a fresh cluster: a left-over one holds the previous run's certificates.
-kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
-kind create cluster --name "$CLUSTER" --wait 120s
-kubectl config use-context "kind-$CLUSTER" >/dev/null
+kind delete cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null 2>&1 || true
+kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" --wait 120s
 K8S_ISSUER=$(kubectl get --raw /.well-known/openid-configuration | sed -n 's/.*"issuer":"\([^"]*\)".*/\1/p')
 echo "cluster service account issuer: $K8S_ISSUER"
 

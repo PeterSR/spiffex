@@ -22,6 +22,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
+	"github.com/PeterSR/spiffex/internal/ca"
 	"github.com/PeterSR/spiffex/internal/exchange"
 	"github.com/PeterSR/spiffex/internal/policy"
 	"github.com/PeterSR/spiffex/internal/state"
@@ -55,7 +56,7 @@ const (
 	// maxSubjectToken bounds a subject token (SPEC section 3.3).
 	maxSubjectToken = 16 << 10
 	// maxManagementTokenTTL is the longest a token for the management
-	// endpoint may live (SPEC section 7).
+	// endpoint may live (SPEC section 7.1).
 	maxManagementTokenTTL = 5 * time.Minute
 )
 
@@ -98,6 +99,7 @@ var errClientAuth = &oauthError{http.StatusUnauthorized, "invalid_client", "clie
 var errSubjectToken = errInvalidRequest("subject token rejected")
 
 var errInvalidTarget = &oauthError{http.StatusBadRequest, "invalid_target", "audience not permitted"}
+var errSVIDTypeNotPermitted = &oauthError{http.StatusBadRequest, "invalid_target", "the origin does not issue this kind of SVID"}
 
 type tokenResponse struct {
 	AccessToken     string `json:"access_token"`
@@ -113,6 +115,10 @@ type grant struct {
 	id        spiffeid.ID
 	origin    *policy.Origin
 	audiences []string
+	// x509Key is the CSR's public key when an X.509-SVID was requested.
+	x509Key crypto.PublicKey
+	// ca is the certificate authority this request was judged against.
+	ca *ca.Set
 }
 
 func (iss *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +135,18 @@ func (iss *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, oe.status, oe, "no-store")
 		return
 	}
+	if g.x509Key != nil {
+		iss.issueX509(w, g)
+		return
+	}
 	token, expires, err := iss.Mint(g.id, g.audiences)
+	if errors.Is(err, errNoJWTKeys) {
+		// A reload during authentication took the last key: the same state
+		// gets the same answer whichever read sees it.
+		iss.cfg.Logger.Error("no JWT-SVID can be issued: the issuer has no signing key", "spiffe_id", g.id, "origin", g.origin.Name)
+		writeJSON(w, errNoJWTKeys.status, errNoJWTKeys, "no-store")
+		return
+	}
 	if err != nil {
 		iss.cfg.Logger.Error("minting a JWT-SVID failed", "spiffe_id", g.id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, &oauthError{Code: "server_error"}, "no-store")
@@ -146,10 +163,10 @@ func (iss *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}, "no-store")
 }
 
-// authorizeTokenRequest authenticates the caller, then checks the audiences
-// it asks for. Audiences are checked only after authentication, so that a
-// refused audience tells nothing to someone who could not authenticate
-// (SPEC section 3.1).
+// authorizeTokenRequest authenticates the caller, then checks the kind of
+// SVID and the audiences or the CSR it asks for. All are checked only after
+// authentication, so that a refusal tells nothing to someone who could not
+// authenticate (SPEC section 3.1).
 func (iss *Issuer) authorizeTokenRequest(r *http.Request) (*grant, error) {
 	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct != "application/x-www-form-urlencoded" {
 		return nil, errInvalidRequest("content type must be application/x-www-form-urlencoded")
@@ -164,15 +181,18 @@ func (iss *Issuer) authorizeTokenRequest(r *http.Request) (*grant, error) {
 	if form.Has("actor_token") {
 		return nil, errInvalidRequest("actor_token is not supported")
 	}
-	if len(form["audience"]) == 0 {
-		return nil, errInvalidRequest("audience is required")
+	// This read only decides whether the request makes sense at all; the set
+	// that signs is read again once the caller is authenticated, which can
+	// take a while for a token exchange.
+	x509Requested, err := iss.checkRequestedType(form, iss.caSnapshot())
+	if err != nil {
+		return nil, err
 	}
 
 	// One view for the whole request, so a reload halfway cannot mix two
 	// versions of the state.
 	view := iss.cfg.Policy.Current()
 	var g *grant
-	var err error
 	switch grantType := form.Get("grant_type"); grantType {
 	case GrantClientCredentials:
 		g, err = iss.authenticateClient(view, form)
@@ -186,8 +206,28 @@ func (iss *Issuer) authorizeTokenRequest(r *http.Request) (*grant, error) {
 	if err != nil {
 		return nil, err
 	}
+	if x509Requested {
+		if !g.origin.AllowsSVIDType("x509") {
+			return nil, errSVIDTypeNotPermitted
+		}
+		g.ca = iss.caSnapshot()
+		if !hasCA(g.ca) {
+			// A reload during authentication took the last CA: the same
+			// state gets the same answer whichever read sees it.
+			return nil, errInvalidRequest("this issuer issues no X.509-SVIDs")
+		}
+		g.x509Key, err = iss.checkCSR(view, g.ca, form.Get("csr"))
+		if err != nil {
+			iss.logRejection("rejected a csr", "origin", g.origin.Name, "reason", err)
+			return nil, err
+		}
+		return g, nil
+	}
 	if g.audiences, err = iss.checkAudiences(form["audience"]); err != nil {
 		return nil, err
+	}
+	if !g.origin.AllowsSVIDType("jwt") {
+		return nil, errSVIDTypeNotPermitted
 	}
 	for _, aud := range g.audiences {
 		if !g.origin.AllowsAudience(aud) {
@@ -197,11 +237,39 @@ func (iss *Issuer) authorizeTokenRequest(r *http.Request) (*grant, error) {
 	return g, nil
 }
 
+// checkRequestedType reads requested_token_type and checks the parameters
+// that go with it, which are properties of the request alone (SPEC section
+// 3.4). It reports whether an X.509-SVID was requested.
+func (iss *Issuer) checkRequestedType(form url.Values, caSet *ca.Set) (bool, error) {
+	switch rt := form.Get("requested_token_type"); rt {
+	case "", TokenTypeJWT:
+		if form.Has("csr") {
+			return false, errInvalidRequest("csr goes only with requested_token_type %s", TokenTypeX509SVID)
+		}
+		if len(form["audience"]) == 0 {
+			return false, errInvalidRequest("audience is required")
+		}
+		if !iss.hasJWTKeys() {
+			return false, errNoJWTKeys
+		}
+		return false, nil
+	case TokenTypeX509SVID:
+		switch {
+		case form.Has("audience"):
+			return false, errInvalidRequest("audience is not allowed with requested_token_type %s", TokenTypeX509SVID)
+		case form.Get("csr") == "":
+			return false, errInvalidRequest("csr is required with requested_token_type %s", TokenTypeX509SVID)
+		case !hasCA(caSet):
+			return false, errInvalidRequest("this issuer issues no X.509-SVIDs")
+		}
+		return true, nil
+	default:
+		return false, errInvalidRequest("requested_token_type must be %s or %s", TokenTypeJWT, TokenTypeX509SVID)
+	}
+}
+
 // exchange verifies an RFC 8693 subject token (SPEC section 3.3).
 func (iss *Issuer) exchange(r *http.Request, view *policy.View, form url.Values) (*grant, error) {
-	if rt := form.Get("requested_token_type"); rt != "" && rt != TokenTypeJWT {
-		return nil, errInvalidRequest("requested_token_type must be %s", TokenTypeJWT)
-	}
 	token := form.Get("subject_token")
 	if token == "" {
 		return nil, errInvalidRequest("subject_token is required")

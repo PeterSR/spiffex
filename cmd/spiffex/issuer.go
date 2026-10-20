@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/PeterSR/spiffex/internal/ca"
 	"github.com/PeterSR/spiffex/internal/issuer"
 	"github.com/PeterSR/spiffex/internal/keyset"
 	"github.com/PeterSR/spiffex/internal/manage"
@@ -28,7 +29,7 @@ func runIssuer(ctx context.Context, args []string) error {
 	listen := fs.String("listen", ":8443", "address to listen on")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file, reloaded when it changes; without one the issuer serves plain HTTP, for use behind a TLS-terminating proxy")
 	tlsKey := fs.String("tls-key", "", "TLS private key file")
-	reload := fs.Duration("reload-interval", 10*time.Second, "how often to check the state and the keys directory for changes")
+	reload := fs.Duration("reload-interval", 10*time.Second, "how often to check the state, the keys directory, the CA directory and the CA roots file for changes")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -68,9 +69,31 @@ func runIssuer(ctx context.Context, args []string) error {
 	if err := pol.Apply(snap); err != nil {
 		return fmt.Errorf("the state in %s is invalid:\n%w", stateStore, err)
 	}
-	keys, err := keyset.NewWatcher(s.KeysDir, logger)
+	// With a CA the issuer still has anchors to publish, so a keys_dir with no
+	// key is a state it can start in, as a ca_dir with no CA key is. Without
+	// a CA it would publish and sign nothing, and fails.
+	var keys *keyset.Watcher
+	if s.CADir != "" {
+		keys, err = keyset.NewWatcherAllowingNoKeys(s.KeysDir, logger)
+	} else {
+		keys, err = keyset.NewWatcher(s.KeysDir, logger)
+	}
 	if err != nil {
 		return fmt.Errorf("signing keys: %w", err)
+	}
+	var authority *ca.Watcher
+	if s.CADir != "" {
+		authority, err = ca.NewWatcher(caOptions(s), logger)
+		if err != nil {
+			return fmt.Errorf("certificate authority: %w", err)
+		}
+		if set, _, _ := authority.Current(); !set.Usable(time.Now(), s.X509SVIDTTL) {
+			cause := "every one is expired, not valid yet or exposed"
+			if len(set.CAs()) == 0 {
+				cause = "no CA has a key in ca_dir"
+			}
+			logger.Warn("no CA can sign X.509-SVIDs now: "+cause, "ca_dir", s.CADir)
+		}
 	}
 	limits := verifier.Limits{
 		PerOrigin:           s.VerifierLimits.PerOrigin,
@@ -97,6 +120,11 @@ func runIssuer(ctx context.Context, args []string) error {
 			return fmt.Errorf("verifier_user: %w", err)
 		}
 		keys.CheckNewKeys(func(path string) error { return secretperm.Check(verifierUser, path) })
+		if authority != nil {
+			if err := guardCAKeys(authority, s.CADir, verifierUser); err != nil {
+				return fmt.Errorf("verifier_user: %w", err)
+			}
+		}
 		limits.User = &verifier.User{UID: u.UID, GID: u.GID}
 	}
 	runner, err := verifier.NewRunner(limits)
@@ -105,7 +133,7 @@ func runIssuer(ctx context.Context, args []string) error {
 	}
 	if len(s.Validation.Verifiers) > 0 && s.VerifierUser == nil {
 		logger.Warn("EXEC VERIFIERS RUN AS THE ISSUER'S OWN USER AND CAN READ ITS SIGNING KEYS: a verifier that is compromised can sign any identity. Set verifier_user to run them as a user that cannot read keys_dir or the TLS key",
-			"verifiers", len(s.Validation.Verifiers), "keys_dir", s.KeysDir)
+			"verifiers", len(s.Validation.Verifiers), "keys_dir", s.KeysDir, "ca_dir", s.CADir)
 	}
 	if len(s.Validation.Verifiers) > 0 {
 		// Whatever a verifier leaves behind is then adopted, killed and
@@ -127,11 +155,17 @@ func runIssuer(ctx context.Context, args []string) error {
 			return err
 		}
 	}
+	var authoritySource issuer.CASource
+	if authority != nil {
+		authoritySource = authority
+	}
 	iss, err := issuer.New(issuer.Config{
 		URL:             s.Issuer(),
 		Management:      management,
 		TrustDomain:     s.TrustDomain(),
 		Keys:            keys,
+		CA:              authoritySource,
+		X509SVIDTTL:     s.X509SVIDTTL,
 		Policy:          pol,
 		Verifiers:       runner,
 		TrustedProxies:  s.TrustedProxies,
@@ -144,6 +178,9 @@ func runIssuer(ctx context.Context, args []string) error {
 	}
 	go store.Watch(ctx, stateStore, snap.Version, *reload, logger, pol)
 	go func() { _ = keys.Run(ctx, *reload) }()
+	if authority != nil {
+		go func() { _ = authority.Run(ctx, *reload) }()
+	}
 
 	// Requests' contexts end at the shutdown deadline at the latest, and
 	// with them the verifiers they run.
@@ -180,7 +217,7 @@ func runIssuer(ctx context.Context, args []string) error {
 	}
 	logger.Info("issuer listening", "address", l.Addr().String(), "tls", *tlsCert != "", "issuer", iss.URL(),
 		"trust_domain", iss.TrustDomain().Name(), "state", stateStore.String(), "state_version", snap.Version, "origins", pol.Current().Len(),
-		"management", s.Management)
+		"management", s.Management, "x509_svids", authority != nil)
 	errc := make(chan error, 1)
 	go func() {
 		if srv.TLSConfig != nil {
@@ -198,6 +235,18 @@ func runIssuer(ctx context.Context, args []string) error {
 	case <-ctx.Done():
 	}
 	return shutdown(srv, endRequests, runner, logger, shutdownGrace)
+}
+
+// guardCAKeys keeps the CA's keys from the exec verifiers' user (SPEC section
+// 2.5): it refuses keys that user can read now, and makes the watcher leave
+// out a new key that user can read and stop signing with one that becomes
+// readable. The certificates in the directory are public and not judged.
+func guardCAKeys(authority *ca.Watcher, dir string, user secretperm.User) error {
+	if err := secretperm.CheckFilesWithSuffix(user, dir, ".key"); err != nil {
+		return err
+	}
+	authority.CheckNewKeys(func(path string) error { return secretperm.Check(user, path) })
+	return nil
 }
 
 // shutdownGrace is how long requests get to finish when the issuer stops,

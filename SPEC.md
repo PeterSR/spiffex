@@ -2,11 +2,11 @@
 
 Version 0, draft. Breaking changes are possible until version 1.
 
-This document specifies how a spiffex **issuer** hands out SPIFFE JWT-SVIDs over plain OAuth 2.0,
-how it decides who gets which identity, how that decision is managed while it runs, and how a
-spiffex **agent** serves the identities to workloads through the SPIFFE Workload API. Anything a
-compliant implementation must do is in here. The issuer's own settings, where it stores its state
-and its command line are implementation details, except where a section names a setting.
+This document specifies how a spiffex **issuer** hands out SPIFFE JWT-SVIDs and X.509-SVIDs over
+plain OAuth 2.0, how it decides who gets which identity, how that decision is managed while it runs,
+and how a spiffex **agent** serves the identities to workloads through the SPIFFE Workload API.
+Anything a compliant implementation must do is in here. The issuer's own settings, where it stores
+its state and its command line are implementation details, except where a section names a setting.
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT",
 "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as
@@ -27,24 +27,27 @@ shown here.
 - The **issuer** is the trust domain's only signer. Verifiers see an OpenID Connect issuer in the
   sense that federation needs: a discovery document and a JWKS that its tokens verify against. It is
   not a full OpenID Provider; there is no authorization endpoint and no end user.
+- The issuer's **certificate authority**, when it has one, signs X.509-SVIDs. It is separate from
+  the JWT signing keys and rotates on its own schedule (section 2.5).
 - A **workload** is anything that needs an identity. It either talks to an agent through the
   Workload API, or speaks OAuth 2.0 to the issuer directly.
 - An **origin** is one way identities come in: a Kubernetes cluster, a CI provider, a set of
-  workload keys. It says what counts as proof, which holders of such proof are admitted, and what
-  SPIFFE ID each one gets (section 4).
+  workload keys. It says what counts as proof, which holders of such proof are admitted, what
+  SPIFFE ID each one gets, and which kinds of SVID they may obtain (section 4).
 - A **provider** is a reusable description of a kind of origin, written as a plain document. Origins
   name a provider and fill in its parameters (section 5).
 - An **agent** acts for exactly one workload. It holds that workload's proof of identity, fetches
-  JWT-SVIDs from the issuer and serves them over the Workload API.
-- A **verifier** checks JWT-SVIDs offline against the issuer's keys, fetched as a SPIFFE bundle, as
-  a JWKS, or through an agent.
+  JWT-SVIDs and X.509-SVIDs from the issuer and serves them over the Workload API.
+- A **verifier** checks JWT-SVIDs offline against the issuer's keys, and X.509-SVIDs against its
+  certificate authorities, fetched as a SPIFFE bundle, as a JWKS (JWT-SVIDs only), or through an
+  agent.
 - **Grants** give SPIFFE identities permission to read and change the state through the management
   API (section 8).
 
 Origins, providers and grants together are the issuer's **state** (section 6). An issuer starts with
 empty state, in which it admits nobody.
 
-Terms from the SPIFFE standards ([SPIFFE-ID], [JWT-SVID], [Trust Domain and Bundle],
+Terms from the SPIFFE standards ([SPIFFE-ID], [JWT-SVID], [X.509-SVID], [Trust Domain and Bundle],
 [Workload API]) keep their meaning here.
 
 ## 2. The issuer
@@ -52,7 +55,8 @@ Terms from the SPIFFE standards ([SPIFFE-ID], [JWT-SVID], [Trust Domain and Bund
 An issuer is identified by its **issuer URL**: an `https` URL with no query, no fragment, no user
 information and no trailing slash. An `http` URL is acceptable only for local development. A trust
 domain has exactly one issuer URL and an issuer URL serves exactly one trust domain. Several
-processes MAY serve the same issuer URL, provided they share one set of signing keys and one state.
+processes MAY serve the same issuer URL, provided they share one set of signing keys, one
+certificate authority if there is one, and one state.
 
 The endpoints below have fixed paths relative to the issuer URL. Clients SHOULD nevertheless take
 them from the discovery document.
@@ -73,13 +77,14 @@ well-known segment inserted after the host when it has one
 | `grant_types_supported` | `client_credentials` and `urn:ietf:params:oauth:grant-type:token-exchange` |
 | `token_endpoint_auth_methods_supported` | `["private_key_jwt", "none"]` |
 | `token_endpoint_auth_signing_alg_values_supported` | algorithms accepted on client assertions |
-| `id_token_signing_alg_values_supported` | algorithms the issuer signs with |
+| `id_token_signing_alg_values_supported` | algorithms of the keys the issuer publishes; `ES256` and `RS256`, the ones it can sign with, when it has no key (section 2.4), because relying parties read the field once and keep it |
 | `response_types_supported` | `["id_token"]`, for consumers that require the field |
 | `subject_types_supported` | `["public"]` |
 | `claims_supported` | `["iss", "sub", "aud", "exp", "iat", "jti"]` |
 | `spiffe_bundle_endpoint` | `<issuer>/bundle` (section 2.3); informational |
 | `spiffe_trust_domain` | the trust domain name, e.g. `example.org`; informational |
 | `spiffex_management_endpoint` | `<issuer>/manage` (section 8), when the management API is enabled |
+| `spiffex_x509_svid_supported` | `true` when the issuer has a certificate authority and issues X.509-SVIDs (section 3.4); absent otherwise |
 
 The two `spiffe_` fields are conveniences for humans and tooling. A SPIFFE federation peer MUST
 configure the trust domain and bundle endpoint URL out of band, as [SPIFFE Federation] requires, and
@@ -90,19 +95,29 @@ MUST NOT take them from this document.
 `GET <issuer>/jwks` returns a JSON Web Key Set ([RFC 7517]) holding every key the issuer publishes:
 keys it signs with now, keys it will sign with after activation, and keys that signed tokens that
 may still be valid (section 2.4). Each key carries `kid`, `alg` and `use: "sig"`. This is the
-endpoint for OIDC consumers: cloud federation, API gateways, generic JWT libraries.
+endpoint for OIDC consumers: cloud federation, API gateways, generic JWT libraries. An issuer with no
+signing key (section 2.4) serves an empty key set (`"keys": []`).
 
 ### 2.3 SPIFFE bundle
 
 `GET <issuer>/bundle` returns the trust domain's bundle in the format of the [Trust Domain and
-Bundle] standard: the same public keys as the JWKS, each with `use: "jwt-svid"` and `kid`, plus
-`spiffe_sequence` and `spiffe_refresh_hint` (seconds). It is a bundle endpoint with the `https_web`
-profile of [SPIFFE Federation].
+Bundle] standard: the same public keys as the JWKS, each with `use: "jwt-svid"` and `kid`, and, when
+the issuer has a certificate authority, each anchor (section 2.5) as a key with `use: "x509-svid"`,
+the certificate's public key parameters (`kty` and its key members) and the certificate in `x5c`,
+one element, the certificate itself. An issuer with no signing key publishes no `jwt-svid` keys, and
+one with no certificate authority no `x509-svid` keys. At startup an issuer needs one of the two, but
+a running one can lose both, when every key and CA file is deleted: its bundle then has an empty
+`keys` array (never `null`), which a consumer MUST read as a trust domain with no authority and not
+as an error. It also carries `spiffe_sequence` and `spiffe_refresh_hint`
+(seconds). It is a bundle endpoint with the `https_web` profile of
+[SPIFFE Federation]. The JWKS (section 2.2) never contains X.509 authorities: OIDC consumers have no
+use for them.
 
-`spiffe_sequence` MUST increase whenever the published key set changes, as observed from any one
-issuer process. Processes serving the same issuer URL SHOULD report the same value for the same key
-set, but nothing guarantees it, so verifiers MUST NOT conclude from the sequence alone that a bundle
-from one process is older than a bundle from another.
+`spiffe_sequence` MUST increase whenever the published key set or the published anchors change, as
+observed from any one issuer process. Processes serving the same issuer URL SHOULD report the same
+value for the same published keys and anchors, but nothing guarantees it, so verifiers MUST NOT
+conclude from the sequence alone that a bundle from one process is older than a bundle from
+another.
 
 ### 2.4 Signing keys and rotation
 
@@ -116,17 +131,141 @@ Rotation MUST NOT break a verifier that refreshes on the published hint:
    from when the key was generated. The activation delay SHOULD be at least three times the
    `spiffe_refresh_hint`, and the JWKS `Cache-Control` max-age MUST NOT exceed the refresh hint.
 2. A key the issuer stopped signing with stays published for at least the maximum JWT-SVID lifetime
-   (section 7) after its last use, plus an allowance for clock skew.
+   (section 7.1) after its last use, plus an allowance for clock skew.
 
 Whenever more than one published key has completed its activation delay, the issuer signs with the
 newest. When none has, as in a newly created trust domain, it signs with the key it would have used
 had it been running all along, or else with the oldest key.
 
 A compromised key is the exception to rule 2: the operator removes it at once, accepting that tokens
-it signed stop verifying.
+it signed stop verifying. This holds for the last key too. When the keys directory is left with no
+key file at all for two polls in a row (one poll only warns, so that a file renamed away and back, or a
+volume remounting, is no removal), the issuer goes on running but signs no JWT-SVID: the token endpoint answers a request
+for one with `invalid_request` (section 3.1), as it does for an X.509-SVID when no CA is left. The
+JWKS and the bundle publish no JWT key, discovery lists the algorithms the issuer can sign with, the X.509 side is
+unaffected, and the management API admits nobody, since it can neither mint nor verify a management
+token (section 8.1); the state in storage is still changed through its files. A key added later is
+published and signs as in the rules above; with no other key it signs at once, as in a newly created
+trust domain. A key that exists but may not sign, because it is exposed (section 5.4), is not this
+case: it stays published and the token endpoint answers `server_error`.
+
+At startup an issuer needs something to publish. With no key in the keys directory it starts only
+if it has a certificate authority (section 2.5), whose anchors it then publishes, and logs an error;
+without a certificate authority it refuses to start. This mirrors the certificate authority, which
+starts with no CA that can sign if anchors remain and refuses to start with none.
 
 Signing keys are not part of the state (section 6) and the management API cannot read or change
-them.
+them. The same holds for the certificate authority's keys and certificates (section 2.5).
+
+### 2.5 The certificate authority
+
+An issuer MAY have a **certificate authority** (CA) that signs X.509-SVIDs. Without one the issuer
+issues no X.509-SVIDs, and everything else in this document is unchanged. The CA's certificates and
+private keys are held like the JWT signing keys, but in a directory of their own (the setting
+`ca_dir`), outside the state and out of reach of the management API.
+
+The **signing CA** is the certificate whose key signs X.509-SVIDs. The **anchors** are the X.509
+authorities the bundle publishes (section 2.3). The two are the same certificate or different ones,
+depending on how the CA is set up:
+
+- A **root**: the signing CA is self-signed. It is the anchor, and the issuer is the trust domain's
+  own root of trust.
+- An **intermediate**: the signing CA is signed by an operator's own CA. The operator's root
+  certificates (the setting `ca_roots`) are the anchors and the bundle holds them, not the
+  intermediate. Section 2.5.1 has the rest.
+
+The anchors are every self-signed CA certificate in `ca_dir` and every certificate in `ca_roots`,
+whether or not a signing CA chains to it yet, except those whose retention under rule 2 below has
+ended. Both kinds may be present at once, as during a move from one setup to the other.
+
+Both are supported. For production, an intermediate under an offline root is RECOMMENDED, because
+the root can then replace a compromised intermediate; a root suits development and small setups.
+
+**What a signing CA certificate is.** It:
+
+- has a non-empty subject that differs between CA generations, a `subjectKeyIdentifier`, and MAY
+  carry one URI SAN, `spiffe://<trust domain>`, with no path;
+- has an ECDSA key on P-256 or P-384, or an RSA key of 2048 to 4096 bits, and signs with
+  ecdsa-with-SHA256 (P-256), ecdsa-with-SHA384 (P-384) or sha256WithRSAEncryption (RSA). RSASSA-PSS
+  is not used;
+- has `basicConstraints`, marked critical, with `cA: true` and `pathLenConstraint: 0`, and
+  `keyUsage`, marked critical, with `keyCertSign` and `cRLSign` only;
+- carries a `nameConstraints` extension, marked critical, holding only these subtrees ([RFC 5280]
+  section 4.2.1.10). Permitted: one `uniformResourceIdentifier` subtree whose base is the trust
+  domain name (`<trust domain>`). Excluded: one `uniformResourceIdentifier` subtree
+  `.<trust domain>`, so that verifiers which match URI constraints as domains do not also accept
+  subdomains, which are other trust domains; one `dNSName` subtree with an empty base; `iPAddress`
+  subtrees `0.0.0.0/0` and `::/0`; and one `rfc822Name` subtree with an empty base. It MUST NOT
+  contain `directoryName` or any other name form.
+
+Name constraints are the CA's fence: a CA that can only certify SPIFFE IDs of its own trust domain
+limits the damage of a stolen CA key to that trust domain, in every verifier that enforces them. The
+extension has no `directoryName` subtrees because Go's X.509 verifier refuses a CA with a critical
+`directoryName` constraint outright, and because [RFC 5280] applies directory name constraints to a
+certificate's subject, so a constraint that excluded directory names would make OpenSSL refuse every
+X.509-SVID with a subject (section 3.4). The CA therefore leaves the subject unconstrained; section
+3.4 fixes what the issuer puts there.
+
+The issuer MUST refuse to start when a signing CA certificate does not meet this profile. When
+`exec` verifiers run as a user of their own (section 5.4), the issuer MUST refuse to start if that
+user can read a CA private key, and MUST stop signing with a CA key that becomes readable to it
+later.
+
+The issuer rereads `ca_dir` and `ca_roots` while it runs. A certificate that fails these checks or
+those of section 2.5.1 at startup stops the issuer from starting; one that appears later is not used
+or published, the issuer logs why, and it goes on with the CAs it already has. A CA certificate
+whose key was removed is not such a failure: it never signs (the way to stop a compromised CA), the
+issuer starts without it, and one left with anchors but no CA that can sign publishes the anchors and
+issues no X.509-SVIDs.
+
+**Rotation** follows the rules of section 2.4, applied to anchors rather than to every CA
+certificate:
+
+1. A new anchor is published in the bundle for at least the activation delay before the issuer
+   issues any X.509-SVID that chains to it.
+2. An anchor stays published until the latest `notAfter` of the X.509-SVIDs chaining to it, plus
+   the clock skew allowance. An anchor past its own `notAfter` MAY be dropped.
+
+As in section 2.4, the delay is measured from when the issuer first publishes the anchor, and when
+no signing CA that has a key can sign by these rules, as in a newly created trust domain or after the
+only CA key was removed, the issuer signs with the signing CA it would have used had it been running
+all along, or else with the oldest, even inside the delay of its anchor. Verifiers that have not yet
+fetched that anchor reject what it signs until they do. The exception is an
+anchor the issuer, while running, published again after it had left the bundle: no CA under it signs
+until the delay has passed, even if that leaves no CA able to sign.
+
+A new intermediate under an anchor whose activation delay has passed may sign at once. Among the
+usable signing CAs the issuer signs with the newest. The activation delay SHOULD exceed the time
+consumers that reload certificates from files need to pick up a new anchor.
+
+**Expiry.** The issuer signs with the newest signing CA that may sign and does not fall back to an
+older one, whose anchor may leave the bundle (rule 2) while the certificates it signed are valid.
+When the newest CA's chain, up to and including the anchor, ends within a full X.509-SVID lifetime,
+it issues the shorter X.509-SVID that section 3.4 allows, and logs a warning; it refuses X.509-SVID
+requests with `server_error` only when the leaf's `notAfter` would be less than 5 minutes after the
+current time. It SHOULD warn from 30 days before the earliest `notAfter` of the chain.
+
+#### 2.5.1 With an intermediate
+
+When the CA is an intermediate, every X.509-SVID response carries the signing CA, and any further
+certificate between it and the anchor, after the leaf, so that verifiers can build the path
+(section 3.4). The anchors are not sent. The issuer MUST refuse to start when the chain does not
+verify against an anchor it publishes.
+
+The anchor widens the trust domain to everything it signs: every verifier then accepts any chain to
+that root that carries a `spiffe://<trust domain>/...` URI SAN, including chains through the
+operator's other CAs, and the signing CA's name constraints protect nothing against a sibling that
+has none. The issuer cannot see siblings, so it asks the operator. Each root MUST either carry the
+full set of name constraints above, exactly, or be dedicated to this trust domain: every CA
+certificate it certifies, directly or through other CAs, is one of this issuer's signing CAs or a CA
+on the path to one, and those CAs certify no other CA. The issuer refuses to start with a root that
+does not carry the full set unless the setting `ca_roots_dedicated` is `true`, by which the operator
+states the second.
+
+Even the full set does not stop a sibling CA under a shared root from minting
+`spiffe://<trust domain>/...` identities: name constraints only confine what a root can certify to
+this trust domain. A shared root is therefore safe only when every CA under it is the operator's own,
+and `ca_roots_dedicated` is the operator's statement that it is.
 
 ## 3. The token endpoint
 
@@ -136,11 +275,14 @@ issuer accepts two grants: client credentials, for origins whose proof is a work
 (section 3.3). The issuer MUST refuse a request body larger than 64 KiB.
 
 Both grants take `audience`. For token exchange it is the [RFC 8693] parameter; for client
-credentials it is a spiffex extension with the same meaning.
+credentials it is a spiffex extension with the same meaning. It is REQUIRED when the requested token
+is a JWT-SVID and MUST be absent when it is an X.509-SVID (section 3.4).
 
 | Parameter | |
 |---|---|
-| `audience` | REQUIRED, MAY repeat. Each distinct value becomes an `aud` entry of the JWT-SVID. At most 5 values, each non-empty and at most 512 bytes. A single audience is RECOMMENDED, as the [JWT-SVID] standard advises. |
+| `audience` | REQUIRED for a JWT-SVID, not allowed for an X.509-SVID. MAY repeat. Each distinct value becomes an `aud` entry of the JWT-SVID. At most 5 values, each non-empty and at most 512 bytes. A single audience is RECOMMENDED, as the [JWT-SVID] standard advises. |
+| `requested_token_type` | OPTIONAL on both grants. `urn:ietf:params:oauth:token-type:jwt`, the default, asks for a JWT-SVID; `urn:spiffex:token-type:x509-svid` asks for an X.509-SVID (section 3.4). Any other value is `invalid_request`. For client credentials it is a spiffex extension. |
+| `csr` | REQUIRED with `urn:spiffex:token-type:x509-svid`, not allowed otherwise: a PKCS#10 certificate signing request ([RFC 2986]), DER, base64url without padding. A spiffex extension. |
 
 Parameters other than `audience` and `resource` MUST appear at most once. `scope` and `resource` are
 ignored. `actor_token` is rejected with `invalid_request`: spiffex does not issue delegation tokens.
@@ -152,10 +294,12 @@ request that names it together with any other audience is rejected with `invalid
 (section 8.1).
 
 When the origin restricts audiences (section 4.4), every requested audience MUST be allowed by it,
-or the request fails with `invalid_target`.
+or the request fails with `invalid_target`. The origin's `svid_types` MUST include the type of SVID
+requested, `jwt` for a JWT-SVID and `x509` for an X.509-SVID (section 4.5), or the request fails
+with `invalid_target`.
 
-A successful response is `200` with `Content-Type: application/json`, `Cache-Control: no-store` and
-the body:
+A successful response for a JWT-SVID is `200` with `Content-Type: application/json`,
+`Cache-Control: no-store` and the body:
 
 ```json
 {
@@ -167,7 +311,8 @@ the body:
 }
 ```
 
-`spiffe_id` duplicates the token's `sub` so a client need not parse the token to learn it.
+`spiffe_id` duplicates the token's `sub` so a client need not parse the token to learn it. The
+response for an X.509-SVID has the same shape and is described in section 3.4.
 
 ### 3.1 Errors
 
@@ -175,17 +320,26 @@ Errors follow [RFC 6749] section 5.2: a JSON body with `error` and optionally `e
 
 | Situation | `error` | Status |
 |---|---|---|
-| Malformed request: wrong content type, missing or repeated parameter (`grant_type` included), wrong `client_assertion_type`, bad audience value, oversized body | `invalid_request` | 400 |
+| Malformed request: wrong content type, missing or repeated parameter (`grant_type` included), wrong `client_assertion_type`, bad audience value, oversized body; an `audience` with an X.509-SVID request, a missing `csr` with one, a `csr` with a JWT-SVID request; a `requested_token_type` that is neither of the two; an X.509-SVID requested from an issuer without a certificate authority, or whose certificate authority has no CA left with a key; a JWT-SVID requested from an issuer whose keys directory holds no key (section 2.4) | `invalid_request` | 400 |
 | A `grant_type` other than the two above | `unsupported_grant_type` | 400 |
 | Client credentials: any failure to authenticate the client with a well-formed assertion | `invalid_client` | 401 |
 | Token exchange: the subject token is invalid, or its origin does not admit it | `invalid_request` | 400 |
 | The caller authenticated, but may not request this audience | `invalid_target` | 400 |
-| Anything else | `server_error` | 500 |
+| The caller authenticated, but its origin's `svid_types` lacks the type requested (section 4.5) | `invalid_target` | 400 |
+| The caller authenticated, but the `csr` does not parse, its signature does not verify with its own key, or its key is not one section 3.4 accepts | `invalid_request` | 400 |
+| Anything else, including an issuer whose certificate authority cannot issue an X.509-SVID of useful length (section 2.5) | `server_error` | 500 |
 
 The issuer MUST finish authenticating the caller before it returns `invalid_target`, so the response
-does not reveal what a given client or token would be permitted. Authentication failures of one
-grant MUST be indistinguishable from each other in status and body: an unknown client and a bad
-signature get the same answer, and so do a token with no origin and a token its origin refuses.
+does not reveal what a given client or token would be permitted. The same holds for the contents of
+a `csr`: a request with a bad `csr` and a bad proof is answered as a bad proof. Whether a `csr` is
+present is a property of the request and is answered first, like a missing audience, and so is whether
+the issuer has a certificate authority at all, or any signing key. After
+authentication the issuer checks the origin's `svid_types` (section 4.5) before the audience
+restriction (section 4.4) and before the contents of the `csr`. A request refused for its origin's
+`svid_types` or for the contents of its `csr` has already consumed the assertion's `jti`
+(section 3.2), as a request with a bad audience does. Authentication failures of one grant MUST be
+indistinguishable from each other in status and body: an unknown client and a bad signature get the
+same answer, and so do a token with no origin and a token its origin refuses.
 Issuers SHOULD also keep their timing similar, for instance by verifying an unknown client's
 assertion against a decoy key. The issuer SHOULD log the actual reason.
 
@@ -238,7 +392,6 @@ understands (section 5.4).
 | `subject_token` | the proof, at most 16 KiB |
 | `subject_token_type` | `urn:ietf:params:oauth:token-type:jwt` or `urn:ietf:params:oauth:token-type:id_token`, processed identically, for `jwt` origins; `urn:spiffex:token-type:exec` for an `exec` origin; any other value is `invalid_request` |
 | `origin` | REQUIRED with `urn:spiffex:token-type:exec`, and not allowed otherwise: the name of the `exec` origin; a spiffex extension |
-| `requested_token_type` | OPTIONAL; if present MUST be `urn:ietf:params:oauth:token-type:jwt` |
 
 For an `exec` origin, the `origin` parameter names the origin. If no `exec` origin has that name,
 the request is rejected as an invalid subject token; otherwise the issuer runs the origin's verifier
@@ -260,6 +413,98 @@ token names at most one origin. The issuer MUST:
    that add a few seconds, as Kubernetes does with its 3607-second tokens.
 5. Check the origin's admission (section 4.3) and issue the SPIFFE ID it names.
 
+### 3.4 Requesting an X.509-SVID
+
+A workload asks for an X.509-SVID by adding `requested_token_type=urn:spiffex:token-type:x509-svid`
+and a `csr` to a token request for a JWT-SVID, in place of its `audience`. Authentication, origin
+selection, admission and naming are exactly those of sections 3.2, 3.3 and 4: the certificate's
+SPIFFE ID is the one a JWT-SVID would have carried. The origin's `svid_types` MUST include `x509`
+(section 4.5); the audience restriction of section 4.4 does not apply, as an X.509-SVID has no
+audience. `spiffex` is not a registered URN namespace, as for `urn:spiffex:token-type:exec`; no
+registered token type names a certificate.
+
+**The request.** After authentication the issuer MUST:
+
+1. decode the `csr` and refuse it unless it is DER, at most 8 KiB and version 1 (the integer 0),
+   and refuse a key that is not ECDSA on P-256 or P-384, Ed25519, or RSA of 2048 to 4096 bits with
+   public exponent 65537, so that an unbounded modulus cannot be used to make the signature check
+   expensive. An Ed25519 key MUST also be refused unless it is the canonical encoding of a point of
+   the curve and the point is not of small order (its multiple by 8 is not the identity): for such a
+   key a signature that verifies can be made without any private key, so the check in step 2 would
+   prove nothing;
+2. refuse the `csr` unless its signature verifies with the public key it contains, which proves the
+   requester holds the private key. The signature algorithm is ecdsa-with-SHA256 for a P-256 key,
+   ecdsa-with-SHA256 or ecdsa-with-SHA384 for a P-384 key (OpenSSL signs with SHA-256 by default),
+   pure Ed25519 for an Ed25519 key, or sha256WithRSAEncryption, sha384WithRSAEncryption or
+   sha512WithRSAEncryption for an RSA key; RSASSA-PSS is not accepted;
+3. refuse a key equal to one of the issuer's own CA or JWT signing keys, or to a member key of any
+   `keys` origin: a workload's certificate key is its own and new. This only catches clients that
+   make their own keys, as an agent generates a new one every time;
+4. ignore every other field of the CSR: its subject, its attributes, its requested extensions and
+   names. Nothing in a CSR reaches the certificate except its public key.
+
+**The certificate.** The issuer builds the certificate itself:
+
+| Field | Value |
+|---|---|
+| Serial number | a positive integer of at most 20 octets: 128 bits from a cryptographic random source, with the top bit cleared |
+| Issuer | the signing CA certificate's subject, byte for byte |
+| Subject | `O=<trust domain>` then `CN=<SPIFFE ID>`, each one UTF8String attribute in its own RDN. `O` is omitted when the trust domain name exceeds 64 characters and `CN` when the SPIFFE ID does (the upper bounds of [RFC 5280]); neither is ever truncated. Nothing from the CSR |
+| Validity | `notBefore` the current time minus 30 seconds, but not before the `notBefore` of any certificate in the chain; `notAfter` the earliest of the current time plus the X.509-SVID lifetime (section 7.2) and the `notAfter` of every certificate in the chain up to and including the anchor |
+| Subject public key | the CSR's |
+| `subjectAltName` | exactly one name, a URI: the SPIFFE ID; critical exactly when the subject is empty |
+| `basicConstraints` | `cA: false`, critical |
+| `keyUsage` | `digitalSignature`, plus `keyEncipherment` for an RSA key only; critical |
+| `extKeyUsage` | `serverAuth` and `clientAuth`; not critical |
+| `authorityKeyIdentifier` | `keyIdentifier` only: the signing CA's `subjectKeyIdentifier` |
+| `subjectKeyIdentifier` | the SHA-1 digest of the subject public key bit string ([RFC 5280] section 4.2.1.2, method 1) |
+
+The signature algorithm is the signing CA's (section 2.5). No other extension is added: in
+particular there is no CRL distribution point, authority information access or OCSP, as an
+X.509-SVID cannot be revoked (section 7.2). The result MUST be a valid leaf X.509-SVID as defined by
+the [X.509-SVID] standard.
+
+If `notAfter` would be less than 5 minutes after the current time, the issuer refuses the request
+with `server_error` and logs why (section 2.5).
+
+**The subject.** The SAN is the identity: verifiers MUST take the SPIFFE ID from the URI SAN
+(section 7.2). The subject repeats it for consumers that read only the subject. Databases such as
+PostgreSQL (`cert` authentication with a user name map), MariaDB (`REQUIRE SUBJECT`) and Valkey
+(mapping the common name to an ACL user) map a client certificate to a user by its CN or DN, and
+none of them reads a URI SAN, so without a subject an X.509-SVID could not authenticate to them.
+The subject is built only from the trust domain and the SPIFFE ID, never from the CSR. Because path
+segments cannot contain `/`, `,`, `=`, `+` or `\`, the common renderings of the subject are
+unambiguous. A CN is left out rather than shortened when the SPIFFE ID exceeds 64 characters, so two
+identities never share a CN and a consumer that matches on it fails closed. The issuer SHOULD log a
+warning naming the origin the first time it issues a certificate without a CN.
+
+**The response.** A successful response has the shape of section 3, with:
+
+```json
+{
+  "access_token": "<the chain>",
+  "issued_token_type": "urn:spiffex:token-type:x509-svid",
+  "token_type": "N_A",
+  "expires_in": 3600,
+  "spiffe_id": "spiffe://example.org/prod/ns/shop/sa/billing"
+}
+```
+
+`access_token` is the certificate chain, leaf first, any intermediate after it: the DER encodings of
+the certificates concatenated, base64url-encoded without padding, as the Workload API's `x509_svid`
+field carries it. `token_type: N_A` is the [RFC 8693] value for a token that is not an access token.
+`expires_in` is the leaf's `notAfter` minus the current time, rounded up to whole seconds. Clients
+schedule renewal from the certificate's own `notBefore` and `notAfter`, not from `expires_in`. The
+private key never leaves the requester. The response does not include the bundle; clients fetch it
+from the bundle endpoint.
+
+The issuer MUST log every X.509-SVID it issues with its serial number, SPIFFE ID, origin and
+`notAfter`: with no revocation the log is the only record.
+
+**Proof reuse.** A client assertion's `jti` is consumed by an X.509-SVID request like any other
+(section 3.2). A subject token may be exchanged for a JWT-SVID and an X.509-SVID in separate
+requests within its lifetime, as it may already be exchanged for JWT-SVIDs of different audiences.
+
 ## 4. Origins
 
 An origin has:
@@ -268,7 +513,8 @@ An origin has:
 - a **provider** (section 5), whose proof, admission and naming it inherits, and values for the
   provider's parameters under `with`;
 - optionally, its own **prefix** and **name template** (section 4.1), admission additions
-  (section 4.3) and an audience restriction (section 4.4);
+  (section 4.3), an audience restriction (section 4.4) and the SVID types it issues
+  (section 4.5);
 - for a `keys` proof, its **members** (section 4.2).
 
 An origin's **kind** is that of its provider's proof: `jwt`, `keys` or `exec`.
@@ -373,10 +619,33 @@ A `keys` origin admits a member whose assertion is valid (section 3.2). It has n
 ### 4.4 Audience restriction
 
 An origin MAY list, as `audiences`, the audiences its identities may request, as patterns in the
-sense of section 4.3; the provider MAY set a default, which an origin's own list replaces. When a list is in effect, the token endpoint
-refuses any other audience with `invalid_target`. This is a convenience for the operator; receivers
-still check `aud` themselves (section 10). The management endpoint is allowed only when the list
-matches it.
+sense of section 4.3; the provider MAY set a default, which an origin's own list replaces. When a
+list is in effect, the token endpoint refuses any other audience with `invalid_target`. This is a
+convenience for the operator; receivers still check `aud` themselves (section 10). The management
+endpoint is allowed only when the list matches it. A list that is empty after expansion is a restriction that allows no audience. The
+restriction applies to JWT-SVIDs only; an X.509-SVID has no audience (section 4.5).
+
+### 4.5 SVID types
+
+An origin MAY set `svid_types`: a non-empty list of distinct values from `jwt` and `x509`, the kinds
+of SVID its identities may obtain. The provider MAY set a default, which the origin's own list
+replaces. When an audience restriction is in effect for the origin (section 4.4), its own or its
+provider's, the list is the origin's own `svid_types`, or `[jwt]` when the origin sets none; the
+provider's `svid_types` does not apply to it. Otherwise the list is the origin's `svid_types`, else
+the provider's, else `[jwt, x509]`. A request for a JWT-SVID from an origin without `jwt`, or for an
+X.509-SVID from an origin without `x509`, fails with `invalid_target`, after authentication
+(section 3.1). An empty list, a repeated value and any other value are invalid (section 6.2). An issuer without a certificate authority issues no
+X.509-SVIDs whatever the list says (section 2.5).
+
+The exception for audience restrictions is there because an X.509-SVID has no audience: any server
+that trusts the bundle accepts it for as long as it lives, so it would escape a restriction that
+says an origin's identities are for certain receivers only. An origin with a restriction therefore
+gets JWT-SVIDs only unless it lists `x509` itself. Listing it is allowed, the restriction then does
+not apply to the origin's X.509-SVIDs, and that SHOULD be avoided: the issuer SHOULD log such an
+origin at startup and whenever a change introduces it, and the validator of section 6.3 SHOULD
+report it without refusing the state. Every other origin gets both kinds, so enabling the issuer's
+certificate authority gives them X.509-SVIDs; an operator who does not want a shared upstream's
+identities to authenticate to every server that trusts the bundle sets `svid_types: [jwt]`.
 
 ## 5. Providers
 
@@ -390,6 +659,7 @@ rules for origin names. A provider has:
 | `require`, `match`, `deny` | admission (section 4.3); `jwt` and `exec` proofs only |
 | `name` | the default name template (section 4.1) |
 | `audiences` | OPTIONAL default audience restriction (section 4.4) |
+| `svid_types` | OPTIONAL default for the kinds of SVID an origin may obtain (section 4.5) |
 | `description` | OPTIONAL text for humans |
 | `overrides` | OPTIONAL: `true` when the provider takes the place of a shipped one of the same name |
 
@@ -672,6 +942,8 @@ origin is expanded with its provider and parameters, the following hold:
 - a `jwt` proof with `jwks` or `jwks_file` has no `ca_file` or `bearer_token_file`, which only
   apply to fetched keys;
 - no pattern in `match`, `deny` or `audiences` is empty;
+- `svid_types`, on a provider or an origin, is not empty and lists only `jwt` and `x509`, each at
+  most once;
 - a member key given as a JWK has `use` absent or `sig`, and an `alg`, if present, that fits the
   key;
 - an `exec` command's path is absolute and clean (no `.` or `..` segments, no repeated `/`).
@@ -696,7 +968,9 @@ also offer, for a given subject token and state, an explanation of the origin th
 whether it is admitted and why not, and the SPIFFE ID it would get. The issuer and the management
 API run the same validation.
 
-## 7. The JWT-SVID
+## 7. Issued SVIDs
+
+### 7.1 The JWT-SVID
 
 The issued token is a JWT-SVID as defined by [JWT-SVID]:
 
@@ -711,6 +985,22 @@ ID in the trust domain the key belongs to. Verifiers that know the issuer URL SH
 
 Removing an origin or member stops new tokens for it once the issuer has taken up the change
 (section 8.3). Tokens already issued stay valid until they expire.
+
+### 7.2 The X.509-SVID
+
+The issued certificate is an X.509-SVID as defined by [X.509-SVID], built as section 3.4 says. Its
+lifetime is chosen by the issuer, is one hour unless the issuer is set otherwise, and MUST be at
+least 10 minutes and MUST NOT exceed 24 hours. Verifiers MUST validate the chain against the X.509
+authorities of the trust domain's bundle, check validity times, and take the SPIFFE ID from the
+single URI SAN, as the [X.509-SVID] standard requires. They MUST NOT take an identity from the
+subject. They SHOULD enforce name constraints.
+
+An X.509-SVID cannot be revoked. Removing an origin or a member stops new SVIDs for it once the
+issuer has taken up the change (section 8.3); SVIDs already issued stay valid until they expire,
+which is why their lifetime is short.
+
+X.509-SVIDs never authenticate to the management API (section 8.1): it accepts only JWT-SVIDs
+addressed to it.
 
 ## 8. The management API
 
@@ -737,6 +1027,11 @@ Callers obtain these tokens like any other, by requesting the audience `<issuer>
 from the token endpoint. A token for that audience is useless anywhere else: a client assertion must
 be addressed to the issuer URL (section 3.2), the token endpoint refuses its own tokens as subject
 tokens (section 3.3), and the audience is never combined with another (section 3).
+
+An identity whose origin's `svid_types` lacks `jwt` cannot obtain one, so grants to it give nothing;
+removing `jwt` does not revoke a management token already issued.
+
+A client certificate, an X.509-SVID included, is never a way to authenticate to the management API.
 
 A missing or invalid token gets `401` with `WWW-Authenticate: Bearer`. The issuer SHOULD refuse a
 management token whose `jti` it has already seen on a write that was authorized; recording `jti`s
@@ -888,17 +1183,26 @@ An agent serves the `SpiffeWorkloadAPI` gRPC service of the [Workload API] on a 
 It MUST NOT listen on TCP: it performs no attestation, so whoever reaches the endpoint receives the
 identity. Workloads find it through `SPIFFE_ENDPOINT_SOCKET=unix:///path/to/socket`.
 
-The agent implements the JWT-SVID profile only, so it is not a complete Workload API server: the
-standard makes the X.509-SVID profile mandatory. Workloads use the JWT parts of their SPIFFE library
-(for go-spiffe, `workloadapi.NewJWTSource`, `FetchJWTSVID`, `ValidateJWTSVID`) and not the X.509 or
-combined bundle sources, which retry `Unimplemented` until their deadline.
+When the issuer issues X.509-SVIDs (its discovery document has `spiffex_x509_svid_supported: true`,
+which the agent reads at start and at each bundle refresh), the agent implements the X.509-SVID and
+JWT-SVID profiles of the [Workload API] and is a complete Workload API server. When it does not, the
+agent implements the JWT-SVID profile only and the X.509 RPCs fail with `Unimplemented`: workloads
+then use the JWT parts of their SPIFFE library (for go-spiffe, `workloadapi.NewJWTSource`,
+`FetchJWTSVID`, `ValidateJWTSVID`) and not the X.509 or combined bundle sources, which retry
+`Unimplemented` until their deadline.
+
+A workload whose origin's `svid_types` (section 4.5) lacks `x509`, as by default for an origin with
+an audience restriction, gets `PermissionDenied` from `FetchX509SVID` and uses the JWT parts of its
+library as above; one whose list lacks `jwt` gets `PermissionDenied` from `FetchJWTSVID`.
 
 | RPC | Behaviour |
 |---|---|
 | `FetchJWTSVID` | Returns a JWT-SVID for the requested audiences, obtained from the token endpoint. If `spiffe_id` is set and differs from the workload's identity, fails with `PermissionDenied`. |
-| `FetchJWTBundles` | Streams the trust domain's JWT bundle, keyed by the trust domain's SPIFFE ID (`spiffe://example.org`), and sends an update whenever the key set changes. Each key carries `kid` and `use: "jwt-svid"`. A bundle without keys is never sent: the agent keeps the last good bundle, and until it has one the stream waits. |
+| `FetchJWTBundles` | Streams the trust domain's JWT bundle, keyed by the trust domain's SPIFFE ID (`spiffe://example.org`), and sends an update whenever the key set changes. Each key carries `kid` and `use: "jwt-svid"`. Until the agent has fetched a bundle the stream waits; after that it sends what the bundle holds, which is an empty set once the issuer has no signing key (section 2.4), since removing a key is how it is revoked. A bundle fetch that fails changes nothing. The agent takes a bundle with only X.509 authorities, as an issuer with a CA and no JWT key serves. |
 | `ValidateJWTSVID` | Validates the token against the bundle and the given audience, and returns its SPIFFE ID and all of its claims. |
-| `FetchX509SVID`, `FetchX509Bundles`, `FetchWITSVID`, `FetchWITBundles` | Fail with `Unimplemented`. |
+| `FetchX509SVID` | Streams the workload's X.509-SVID: the certificate chain, the private key (PKCS#8 DER) and the trust domain's X.509 bundle, as the standard shapes them. The agent holds one current X.509-SVID for the workload and sends it to every open stream. It generates a new P-256 key for each SVID, and obtains a new SVID when the current one has lived between 40 and 50 percent of its lifetime (random within that window), measured from the certificate's `notBefore` and `notAfter`. It retries with backoff while the issuer fails, and never sends an SVID with less than a tenth of its lifetime left. It sends an update to every stream whenever the SVID or the trust domain's X.509 authorities change. `crl` and `federated_bundles` are empty. Until the first SVID exists, and until the bundle has an X.509 authority, a stream waits. The agent sends an SVID only if it chains to the bundle it sends with it, checked again whenever either changes, and renews early an SVID whose anchor has left the bundle; it fetches the bundle once more when the chain does not verify, and treats an SVID that still does not as a failed request. When the issuer refuses a request, the first or a renewal (`PermissionDenied` below), every open stream ends with that code and the agent drops the SVID; it remembers the refusal for one minute and answers new streams with it without asking the issuer again. A stream that has no SVID to send when the agent cannot produce its proof of identity ends with `FailedPrecondition`. |
+| `FetchX509Bundles` | Streams the X.509 authorities of the trust domain's bundle, keyed by the trust domain's SPIFFE ID, and sends an update whenever they change. Like the JWT bundle, a bundle without X.509 authorities is never sent. |
+| `FetchWITSVID`, `FetchWITBundles` | Fail with `Unimplemented`. |
 
 The agent's gRPC status codes:
 
@@ -909,24 +1213,31 @@ The agent's gRPC status codes:
 | `ValidateJWTSVID` given a token that does not validate | `InvalidArgument` |
 | The issuer refused the request (`invalid_client`, `invalid_request`, `invalid_target`, `unsupported_grant_type`) | `PermissionDenied` |
 | The issuer is unreachable or failed, or no bundle has been fetched yet | `Unavailable` |
+| The issuer issues no X.509-SVIDs and `FetchX509SVID` or `FetchX509Bundles` is called | `Unimplemented` |
 | The agent cannot produce its own proof of identity (an unreadable subject token file, or a subject token command that fails) | `FailedPrecondition` |
 
 An agent supports both grants of section 3 and is configured to use one. For token exchange it
 obtains the subject token for each request either by reading a file, which platforms such as
 Kubernetes rotate in place, or by running a configured command without a shell and taking its
 standard output, for proofs that must be made fresh (a signed cloud API request, for one). It sends
-the subject token type its configuration names and, for an `exec` origin, the origin's name. It SHOULD reuse a JWT-SVID
+the subject token type its configuration names and, for an `exec` origin, the origin's name. For an
+X.509-SVID it adds `requested_token_type` and a `csr` (section 3.4). It SHOULD reuse a JWT-SVID
 for the same audiences until half its lifetime has passed, and SHOULD refresh the bundle at the
 issuer's `spiffe_refresh_hint`.
 
+The private keys of X.509-SVIDs exist only in the agent's memory and in the responses it sends over
+the socket. An agent MUST NOT write them to disk.
+
 Deployments MUST restrict access to the socket: file permissions, or a volume shared only with the
 workload's own containers. A workload whose identity holds grants can obtain management tokens
-through its agent, so the socket carries those permissions too.
+through its agent, so the socket carries those permissions too, and it carries the private keys of
+X.509-SVIDs.
 
 ## 10. Security considerations
 
 - **The issuer is the trust root.** Its signing keys can mint any identity in the trust domain.
-  Store them like any CA key and rotate them (section 2.4).
+  Store them like any CA key and rotate them (section 2.4). Deleting every key file stops JWT
+  signing at once, the response to a compromise of the only key.
 - **The state is the policy.** Whoever can write the stored state, and any identity holding `write`
   on `/`, controls every identity. Grant that sparingly and protect the storage like the signing
   keys. The issuer's settings (section 5.2) bound what even they can do with files on the issuer's
@@ -938,6 +1249,34 @@ through its agent, so the socket carries those permissions too.
   can take on the identities its origin issues: whoever can create a service account in a namespace
   becomes the identity that service account maps to. Give grants to identities from `keys` origins,
   or from upstreams where creating such an identity is itself tightly controlled.
+- **The certificate authority is a second trust root.** Its keys can mint any X.509 identity in the
+  trust domain. Guard them like the JWT signing keys and keep them in separate directories, so that
+  a mistake in one mount or Secret does not expose the other; both live in one process. Prefer an
+  intermediate under an offline root, so the root can replace a compromised intermediate.
+- **Name constraints are the CA's fence.** A verifier that does not enforce them trusts a stolen CA
+  key for any name it accepts, not only SPIFFE IDs of this trust domain. Pin the trust domain's
+  bundle only in the places that should accept these identities, never in a system trust store.
+  Enforcement differs between verifiers: OpenSSL does not apply the excluded `rfc822Name` subtree to
+  email SANs, so a verifier MUST take the identity from the URI SAN alone and ignore every other
+  name. A shared root (section 2.5.1) is not fenced against sibling CAs minting identities of this
+  trust domain, whatever its constraints say; only `ca_roots_dedicated` states that none exist.
+- **X.509-SVIDs carry no DNS name.** So a server that must be reached by name keeps a certificate
+  for its DNS name from another CA (a database with libpq `sslmode=verify-full`, for one). A TLS
+  client that trusts the bundle but cannot authorize the server's SPIFFE ID (libpq with
+  `sslmode=verify-ca`) accepts any workload of the trust domain as the server, as every X.509-SVID
+  carries `serverAuth`.
+- **The identity is the SAN.** The subject is a convenience for consumers that read only it
+  (section 3.4); a verifier that takes an identity from the CN or DN instead of the URI SAN gives up
+  the guarantee that a CSR cannot name anything.
+- **A CSR is input from the requester.** Only its public key is used; an implementation that copies
+  any requested name or extension into a certificate breaks the naming rules of section 4.
+- **X.509-SVIDs have no audience.** An audience restriction does not apply to them (section 4.4), so
+  an origin with one gets JWT-SVIDs only unless it lists `x509` (section 4.5). Set
+  `svid_types: [jwt]` on any other origin whose identities should not be able to authenticate to
+  every server that trusts the bundle.
+- **The log is the only record.** X.509-SVIDs cannot be revoked; the issuer's log of serial numbers
+  and SPIFFE IDs is how a stolen certificate is traced, and short lifetimes are the only other
+  defence.
 - **Proofs, not shared secrets.** A `keys` origin stores only public keys; a `jwt` origin stores
   nothing about the workload at all. Reading the state does not let anyone impersonate a workload.
 - **JWT-SVIDs are bearer tokens.** Anyone holding one can use it against its audiences until it
@@ -972,10 +1311,13 @@ on the provider; requesting that single audience is RECOMMENDED. Trust policies 
 
 [SPIFFE-ID]: https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE-ID.md
 [JWT-SVID]: https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md
+[X.509-SVID]: https://github.com/spiffe/spiffe/blob/main/standards/X509-SVID.md
 [Trust Domain and Bundle]: https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Trust_Domain_and_Bundle.md
 [SPIFFE Federation]: https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Federation.md
 [Workload API]: https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md
 [RFC 2119]: https://www.rfc-editor.org/rfc/rfc2119
+[RFC 2986]: https://www.rfc-editor.org/rfc/rfc2986
+[RFC 5280]: https://www.rfc-editor.org/rfc/rfc5280
 [RFC 6749]: https://www.rfc-editor.org/rfc/rfc6749
 [RFC 6901]: https://www.rfc-editor.org/rfc/rfc6901
 [RFC 7517]: https://www.rfc-editor.org/rfc/rfc7517

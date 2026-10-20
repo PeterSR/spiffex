@@ -47,6 +47,10 @@ type CheckResult struct {
 	Problems []Problem `json:"problems,omitempty"`
 	// Overrides names the providers that take the place of shipped ones.
 	Overrides []string `json:"overrides,omitempty"`
+	// X509UnderRestriction names the origins that have an audience
+	// restriction and list x509 in svid_types, whose X.509-SVIDs escape
+	// the restriction (SPEC section 4.5).
+	X509UnderRestriction []string `json:"x509_under_restriction,omitempty"`
 }
 
 func toProblems(ps state.Problems) []Problem {

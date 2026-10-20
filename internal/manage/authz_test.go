@@ -341,6 +341,40 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+// An origin with an audience restriction that lists x509 is reported, and
+// the field is absent otherwise (SPEC section 4.5).
+func TestCheckReportsX509UnderRestriction(t *testing.T) {
+	h := newHarness(t, fileStore(t), people)
+	check := func(origin map[string]any) CheckResult {
+		a := h.as("/people/alice", http.MethodPost, "/check", map[string]any{"origins": map[string]any{"web": origin}})
+		wantStatus(t, a, http.StatusOK)
+		var result CheckResult
+		if err := json.Unmarshal(a.body, &result); err != nil {
+			t.Fatal(err)
+		}
+		if !result.Valid {
+			t.Fatalf("problems %v", result.Problems)
+		}
+		return result
+	}
+	listed := check(map[string]any{"provider": "keys", "audiences": []string{"orders"}, "svid_types": []string{"jwt", "x509"}})
+	if len(listed.X509UnderRestriction) != 1 || listed.X509UnderRestriction[0] != "web" {
+		t.Errorf("x509_under_restriction = %v, want [web]", listed.X509UnderRestriction)
+	}
+	for name, origin := range map[string]map[string]any{
+		"restricted, JWT only by default": {"provider": "keys", "audiences": []string{"orders"}},
+		"unrestricted":                    {"provider": "keys", "svid_types": []string{"jwt", "x509"}},
+	} {
+		if got := check(origin).X509UnderRestriction; len(got) != 0 {
+			t.Errorf("%s: x509_under_restriction = %v", name, got)
+		}
+	}
+	a := h.as("/people/alice", http.MethodPost, "/check", map[string]any{})
+	if strings.Contains(string(a.body), "x509_under_restriction") {
+		t.Errorf("the field is present when empty: %s", a.body)
+	}
+}
+
 func wrapHandler(next http.Handler, path string, hit func()) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == path {

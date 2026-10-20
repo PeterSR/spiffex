@@ -61,9 +61,10 @@ func (s *Server) check(w http.ResponseWriter, r *http.Request, c caller, b *base
 	}
 	report := state.Validate(&proposed, s.cfg.Settings)
 	writeJSON(w, http.StatusOK, noVersion, CheckResult{
-		Valid:     len(report.Problems) == 0,
-		Problems:  toProblems(report.Problems),
-		Overrides: report.Overrides,
+		Valid:                len(report.Problems) == 0,
+		Problems:             toProblems(report.Problems),
+		Overrides:            report.Overrides,
+		X509UnderRestriction: report.X509UnderRestriction(),
 	})
 }
 

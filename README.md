@@ -3,9 +3,10 @@
 **SPIFFE token exchange - workload identity from a plain OAuth 2.0 issuer.**
 
 Your services prove who they are to one issuer and get short-lived, audience-bound
-[JWT-SVIDs](https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md) back. Workloads keep
-using the stock SPIFFE libraries through the
-[Workload API](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md).
+[JWT-SVIDs](https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md) back, or, when the
+issuer has a certificate authority, [X.509-SVIDs](docs/x509.md) for mutual TLS and for data
+stores that authenticate clients by certificate. Workloads keep using the stock SPIFFE libraries
+through the [Workload API](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md).
 Verifiers, cloud providers included, see an ordinary OpenID Connect issuer. There is no SPIRE
 server, no privileged per-node agent and no registration database to run.
 
@@ -22,14 +23,16 @@ spiffex is the small version:
 - **The issuer is an OAuth 2.0 token endpoint.** A workload authenticates with `private_key_jwt` (it
   holds a private key, the issuer knows only the public key) or exchanges a proof it already has: a
   Kubernetes service account token, a GitHub Actions OIDC token, a cloud identity token. The issuer
-  maps that proof to a SPIFFE ID and signs a JWT-SVID.
+  maps that proof to a SPIFFE ID and signs a JWT-SVID, or certifies a key the workload made for an
+  X.509-SVID.
 - **The agent serves one workload.** It sits next to the workload as a sidecar or a local process,
-  speaks the Workload API on a Unix socket and fetches tokens from the issuer. Because it serves a
-  single workload, it needs no workload attestation and no privileges.
+  speaks the Workload API on a Unix socket and fetches tokens and certificates from the issuer.
+  Because it serves a single workload, it needs no workload attestation and no privileges.
 - **The issuer is also an OIDC issuer.** It publishes OIDC discovery, a JWKS and a SPIFFE bundle
-  endpoint, so API gateways, SPIFFE libraries and cloud federation (AWS `AssumeRoleWithWebIdentity`,
-  within the limits in [SPEC.md section 11](SPEC.md#11-notes-for-aws-federation)) verify its tokens
-  without any extra component.
+  endpoint (which also holds the X.509 roots), so API gateways, SPIFFE libraries and cloud
+  federation (AWS `AssumeRoleWithWebIdentity`, within the limits in
+  [SPEC.md section 11](SPEC.md#11-notes-for-aws-federation)) verify its tokens without any extra
+  component.
 
 ## How it decides who is who
 
@@ -65,12 +68,12 @@ Each release, listed on [the releases page](https://github.com/PeterSR/spiffex/r
 - **Binaries** for Linux and macOS, amd64 and arm64: download the archive for your platform,
   `checksums.txt` and its signature, and verify them ([RELEASING.md](RELEASING.md#verifying-a-release))
   before unpacking `spiffex`.
-- **An image**, `ghcr.io/petersr/spiffex:v0.1.2`, for `linux/amd64` and `linux/arm64`, distroless
+- **An image**, `ghcr.io/petersr/spiffex:v0.2.0`, for `linux/amd64` and `linux/arm64`, distroless
   and running as a non-root user. Pin it by digest once you have verified it.
 - **A Helm chart** for the issuer, `oci://ghcr.io/petersr/charts/spiffex`:
 
   ```bash
-  helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.1.2 \
+  helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.2.0 \
     --namespace spiffex -f values.yaml
   ```
 
@@ -132,8 +135,23 @@ kubectl -n shop exec deploy/billing -c spiffex-agent -- /spiffex token \
   -audience spiffe://example.org/cluster/ns/shop/sa/orders
 ```
 
+To get an X.509-SVID instead, give the issuer a certificate authority (`spiffex ca init -dir DIR
+-trust-domain TD`, then `ca_dir` in the settings) and ask the agent for one:
+
+```go
+td := spiffeid.RequireTrustDomainFromString("example.org")
+source, err := workloadapi.NewX509Source(ctx)
+tlsConfig := tlsconfig.MTLSServerConfig(source, source, tlsconfig.AuthorizeMemberOf(td))
+```
+
+[docs/x509.md](docs/x509.md) covers the certificate profile, setting up and rotating the CA,
+responding to a leaked key, and PostgreSQL and Valkey as examples of data stores that read
+the certificate.
+
 ## Documentation
 
+- **[X.509-SVIDs](docs/x509.md):** what the certificates contain, the certificate authority and its
+  rotation, what to do when a key leaks, getting and using the certificates, and what has been tested.
 - **[Configuration and operations](docs/configuration.md):** the issuer's settings, where the state
   is kept, workloads with keys, the agent's flags, rotating signing keys.
 - **[Providers](docs/providers.md):** the shipped providers and their parameters, writing your own,
@@ -152,8 +170,9 @@ kubectl -n shop exec deploy/billing -c spiffex-agent -- /spiffex token \
 |---|---|
 | [SPIFFE-ID](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE-ID.md) | issued and validated |
 | [JWT-SVID](https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md) | issued and validated |
+| [X.509-SVID](https://github.com/spiffe/spiffe/blob/main/standards/X509-SVID.md) | issued, by an issuer with a certificate authority, for a key the workload makes ([docs/x509.md](docs/x509.md)) |
 | [Trust bundles](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Trust_Domain_and_Bundle.md) | served as an `https_web` bundle endpoint |
-| [Workload API](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md) | the JWT-SVID profile only. Without X.509-SVIDs the agent is not a complete Workload API server; use your library's JWT source. |
+| [Workload API](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md) | the JWT-SVID and X.509-SVID profiles. Against an issuer without a certificate authority the X.509 calls answer `Unimplemented` and the JWT profile is all there is |
 
 ## Status
 

@@ -606,3 +606,96 @@ func TestChartBareOn(t *testing.T) {
 		}
 	})
 }
+
+// The certificate authority: the Secret is mounted like the signing keys,
+// the roots from a ConfigMap or a Secret, and the settings name them.
+func TestChartCA(t *testing.T) {
+	helm := helmPath(t)
+	base := []string{"--set", "trustDomain=example.org", "--set", "signingKeys.existingSecret=keys", "--set", "tls.existingSecret=tls"}
+	with := func(extra ...string) []string { return append(slices.Clone(base), extra...) }
+
+	t.Run("without a CA", func(t *testing.T) {
+		out := renderText(t, helm, base...)
+		for _, unwanted := range []string{"ca_dir", "ca_roots", "x509_svid_ttl", "name: ca\n", "ca-roots"} {
+			if strings.Contains(out, unwanted) {
+				t.Errorf("no CA is set, yet the output has %q", unwanted)
+			}
+		}
+	})
+	t.Run("a root", func(t *testing.T) {
+		out := renderText(t, helm, with("--set", "ca.existingSecret=my-ca")...)
+		for _, want := range []string{"ca_dir: /ca\n", `secretName: "my-ca"` + "\n            defaultMode: 0440", "mountPath: /ca\n"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the output lacks %q", want)
+			}
+		}
+		if strings.Contains(out, "ca_roots") || strings.Contains(out, "mountPath: /ca-roots") {
+			t.Error("no roots are set, yet the output names some")
+		}
+	})
+	t.Run("roots in a ConfigMap, dedicated, with a lifetime", func(t *testing.T) {
+		out := renderText(t, helm, with("--set", "ca.existingSecret=my-ca", "--set", "ca.roots.configMap=my-roots",
+			"--set", "ca.rootsDedicated=true", "--set", "x509SVIDTTL=30m")...)
+		for _, want := range []string{`ca_roots: "/ca-roots/ca-roots.pem"`, "ca_roots_dedicated: true", `x509_svid_ttl: "30m"`,
+			"mountPath: /ca-roots\n", "configMap:\n            name: \"my-roots\"\n            items:\n              - key: \"ca-roots.pem\""} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the output lacks %q", want)
+			}
+		}
+	})
+	t.Run("roots in a Secret under another key", func(t *testing.T) {
+		out := renderText(t, helm, with("--set", "ca.existingSecret=my-ca", "--set", "ca.roots.secret=my-roots", "--set", "ca.roots.key=r.pem")...)
+		for _, want := range []string{`ca_roots: "/ca-roots/r.pem"`, "ca_roots_dedicated: false", `secretName: "my-roots"` + "\n            defaultMode: 0440\n            items:\n              - key: \"r.pem\""} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the output lacks %q", want)
+			}
+		}
+	})
+	t.Run("lifetimes in range", func(t *testing.T) {
+		for _, ttl := range []string{"10m", "90m", "1440m", "1h", "24h", "1h30m", "23h59m"} {
+			if _, err := helmTemplate(t, helm, with("--set", "x509SVIDTTL="+ttl)...); err != nil {
+				t.Errorf("%s: %v", ttl, err)
+			}
+		}
+	})
+	t.Run("a change of the CA settings restarts the issuer", func(t *testing.T) {
+		sum := func(extra ...string) string {
+			out := renderText(t, helm, with(extra...)...)
+			_, after, _ := strings.Cut(out, "checksum/settings: ")
+			line, _, _ := strings.Cut(after, "\n")
+			return line
+		}
+		if sum() == sum("--set", "ca.existingSecret=my-ca") {
+			t.Error("adding a CA left the settings checksum alone")
+		}
+	})
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"roots without a CA", with("--set", "ca.roots.configMap=r"), "ca.roots needs ca.existingSecret"},
+		{"both kinds of roots", with("--set", "ca.existingSecret=c", "--set", "ca.roots.configMap=r", "--set", "ca.roots.secret=r"), "alternatives"},
+		{"dedicated without roots", with("--set", "ca.existingSecret=c", "--set", "ca.rootsDedicated=true"), "ca.roots names none"},
+		{"an unknown value", with("--set", "ca.secret=c"), "secret"},
+		{"a bad lifetime", with("--set", "x509SVIDTTL=soon"), "x509SVIDTTL"},
+		{"a lifetime under ten minutes", with("--set", "x509SVIDTTL=5m"), "x509SVIDTTL"},
+		{"a lifetime over a day", with("--set", "x509SVIDTTL=48h"), "x509SVIDTTL"},
+		{"a lifetime just over a day", with("--set", "x509SVIDTTL=24h1m"), "x509SVIDTTL"},
+		{"a roots key that leaves the directory", with("--set", "ca.existingSecret=c", "--set", "ca.roots.configMap=r", "--set", "ca.roots.key=.."), "ca.roots.key"},
+		{"the CA among the readable files", with("--set", "readableFiles={/ca/ca.key}"), "readableFiles.0"},
+	} {
+		if _, err := helmTemplate(t, helm, c.args...); err == nil || !schemaErrorNames(err.Error(), c.want) && !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want an error containing %q, got %v", c.name, c.want, err)
+		}
+	}
+}
+
+func renderText(t *testing.T, helm string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command(helm, append([]string{"template", "spiffex-issuer", chartDir, "--namespace", "spiffex"}, args...)...).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}

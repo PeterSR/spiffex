@@ -6,9 +6,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+// cmdlineTimeout is how long Open waits for a process's command line to
+// show its marker.
+const cmdlineTimeout = 2 * time.Second
 
 // Process is a process held by a pidfd, which keeps naming that process even
 // after it is gone and its ID reused.
@@ -28,10 +33,22 @@ func Open(t *testing.T, pid int, marker string) *Process {
 	t.Cleanup(func() { unix.Close(fd) })
 	p := &Process{fd: fd}
 	// The command line is read through the ID, which names the pidfd's
-	// process for as long as that is alive, so check that it still is.
-	cmdline, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
-	if err != nil || !p.Alive() {
-		t.Fatalf("process %d was gone before the test could watch it", pid)
+	// process for as long as that is alive, so check that it still is. A
+	// process in the middle of exec (a background job of a shell, just
+	// started) has an empty command line until the new program is in place,
+	// so wait for it.
+	var cmdline []byte
+	deadline := time.Now().Add(cmdlineTimeout)
+	for {
+		var err error
+		cmdline, err = os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+		if err != nil || !p.Alive() {
+			t.Fatalf("process %d was gone before the test could watch it", pid)
+		}
+		if strings.Contains(string(cmdline), marker) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 	if !strings.Contains(string(cmdline), marker) {
 		t.Fatalf("process %d is not the process under test: %q", pid, cmdline)

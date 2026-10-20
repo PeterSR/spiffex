@@ -37,6 +37,20 @@ func (r *Report) Err() error {
 	return r.Problems
 }
 
+// X509UnderRestriction names the origins that have an audience restriction
+// and list x509 in svid_types, whose X.509-SVIDs escape the restriction
+// (SPEC section 4.5), sorted.
+func (r *Report) X509UnderRestriction() []string {
+	var names []string
+	for name, e := range r.Origins {
+		if e.Audiences != nil && e.AllowsSVIDType("x509") {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
 // The checks that need a whole state (SPEC section 6.3).
 const (
 	checkPrefixOverlap  = "prefix overlap"

@@ -13,6 +13,11 @@ trustDomain: ""
 # Lifetime of issued JWT-SVIDs, at most 1h.
 tokenTTL: 5m
 
+# Lifetime of issued X.509-SVIDs, 10m to 24h, written as minutes (90m), hours (2h) or hours and
+# minutes (1h30m); the schema refuses other forms, since the issuer would not start. Unset keeps the issuer's default, 1h. Only matters with
+# ca.existingSecret.
+x509SVIDTTL: ""
+
 # How long a new signing key is published before it signs.
 activationDelay: 30m
 
@@ -89,6 +94,24 @@ state:
 signingKeys:
   # The Secret holding the signing keys, one PEM file per key, made with spiffex key add (required).
   existingSecret: ""
+
+# The certificate authority that signs X.509-SVIDs (docs/configuration.md, "The certificate
+# authority"). Without ca.existingSecret the issuer has no CA and issues JWT-SVIDs only.
+ca:
+  # The Secret holding the CA's files, one key per file, as spiffex ca init or ca import write them
+  # (ca-<time>.crt and ca-<time>.key). Mounted at the issuer's ca_dir, mode 0440 like the signing
+  # keys. The issuer rereads it while it runs, so a rotation replaces the Secret as a whole.
+  existingSecret: ""
+  # Root certificates of your own CA, for a CA in the Secret that is an intermediate under them
+  # (ca_roots). Name a ConfigMap or a Secret, not both.
+  roots:
+    configMap: ""
+    secret: ""
+    # The key of the object that holds the PEM file of the roots.
+    key: ca-roots.pem
+  # Your statement that every CA those roots certify is this issuer's (ca_roots_dedicated); needed
+  # for a root without the name constraints of SPEC section 2.5.
+  rootsDedicated: false
 
 tls:
   # A kubernetes.io/tls Secret with tls.crt and tls.key, valid for the issuer's host name.

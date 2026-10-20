@@ -28,6 +28,7 @@ import (
 const (
 	DefaultTokenTTL        = 5 * time.Minute
 	DefaultActivationDelay = 30 * time.Minute
+	DefaultX509SVIDTTL     = time.Hour
 
 	DefaultVerifiersPerOrigin  = 4
 	DefaultVerifiersTotal      = 16
@@ -36,10 +37,12 @@ const (
 )
 
 // Bounds on the lifetimes the issuer works with. The longest JWT-SVID
-// lifetime is fixed by SPEC section 7.
+// lifetime and the range of X.509-SVID lifetimes are fixed by SPEC section 7.
 const (
 	MinTokenTTL           = 10 * time.Second
 	MaxTokenTTL           = time.Hour
+	MinX509SVIDTTL        = 10 * time.Minute
+	MaxX509SVIDTTL        = 24 * time.Hour
 	MinActivationDelay    = 3 * time.Second
 	maxSettingsFileLength = 1 << 20
 )
@@ -52,6 +55,10 @@ type File struct {
 	KeysDir          string             `yaml:"keys_dir"`
 	TokenTTL         time.Duration      `yaml:"token_ttl"`
 	ActivationDelay  time.Duration      `yaml:"activation_delay"`
+	CADir            string             `yaml:"ca_dir"`
+	CARoots          string             `yaml:"ca_roots"`
+	CARootsDedicated bool               `yaml:"ca_roots_dedicated"`
+	X509SVIDTTL      time.Duration      `yaml:"x509_svid_ttl"`
 	State            *StateLocation     `yaml:"state"`
 	Management       bool               `yaml:"management"`
 	ReadableFiles    *[]string          `yaml:"readable_files"`
@@ -130,7 +137,15 @@ type Settings struct {
 	KeysDir         string
 	TokenTTL        time.Duration
 	ActivationDelay time.Duration
-	State           StateLocation
+	// CADir is the certificate authority's directory (SPEC section 2.5), or
+	// empty when the issuer has no CA and issues no X.509-SVIDs. CARoots is
+	// the operator's file of root certificates, or empty, and
+	// CARootsDedicated says they are dedicated to the trust domain.
+	CADir            string
+	CARoots          string
+	CARootsDedicated bool
+	X509SVIDTTL      time.Duration
+	State            StateLocation
 	// Management serves the management API (SPEC section 8), which changes
 	// the state in its storage.
 	Management             bool
@@ -313,6 +328,8 @@ func (f *File) settings(baseDir string, partial bool) (*Settings, error) {
 		KeysDir:                resolve(baseDir, f.KeysDir),
 		TokenTTL:               f.TokenTTL,
 		ActivationDelay:        f.ActivationDelay,
+		CARootsDedicated:       f.CARootsDedicated,
+		X509SVIDTTL:            f.X509SVIDTTL,
 		Management:             f.Management,
 		RefusePrivateAddresses: f.Fetch.RefusePrivateAddresses == nil || *f.Fetch.RefusePrivateAddresses,
 		VerifierLimits:         f.VerifierLimits,
@@ -357,6 +374,15 @@ func (f *File) settings(baseDir string, partial bool) (*Settings, error) {
 	if s.ActivationDelay < MinActivationDelay {
 		return nil, fmt.Errorf("activation_delay %s is too short (at least %s)", s.ActivationDelay, MinActivationDelay)
 	}
+	if s.X509SVIDTTL == 0 {
+		s.X509SVIDTTL = DefaultX509SVIDTTL
+	}
+	if s.X509SVIDTTL < MinX509SVIDTTL || s.X509SVIDTTL > MaxX509SVIDTTL {
+		return nil, fmt.Errorf("x509_svid_ttl %s is out of range (%s to %s)", s.X509SVIDTTL, MinX509SVIDTTL, MaxX509SVIDTTL)
+	}
+	if err := f.certificateAuthority(s, baseDir); err != nil {
+		return nil, err
+	}
 	if f.State != nil || !partial {
 		if s.State, err = f.stateLocation(baseDir); err != nil {
 			return nil, err
@@ -366,6 +392,57 @@ func (f *File) settings(baseDir string, partial bool) (*Settings, error) {
 		return nil, fmt.Errorf("verifier_limits: %w", err)
 	}
 	return s, nil
+}
+
+// certificateAuthority fills in the CA settings. They are all optional, but
+// ca_roots and ca_roots_dedicated mean nothing without ca_dir, and the CA's
+// keys must not share a directory with the JWT signing keys: a mistake in one
+// mount or Secret should not expose both (SPEC section 10).
+func (f *File) certificateAuthority(s *Settings, baseDir string) error {
+	if f.CADir == "" {
+		if f.CARoots != "" || f.CARootsDedicated {
+			return errors.New("ca_roots and ca_roots_dedicated need ca_dir")
+		}
+		return nil
+	}
+	if f.CARootsDedicated && f.CARoots == "" {
+		return errors.New("ca_roots_dedicated says the roots in ca_roots are dedicated to the trust domain, and ca_roots is not set")
+	}
+	s.CADir = resolve(baseDir, f.CADir)
+	if f.CARoots != "" {
+		s.CARoots = resolve(baseDir, f.CARoots)
+	}
+	if f.KeysDir != "" && overlaps(s.CADir, s.KeysDir) {
+		return fmt.Errorf("ca_dir %s and keys_dir %s must be separate directories, neither inside the other", s.CADir, s.KeysDir)
+	}
+	return nil
+}
+
+// overlaps reports whether either path is the other or inside the other,
+// looking through symbolic links in the parts that exist.
+func overlaps(a, b string) bool {
+	a, b = realPath(a), realPath(b)
+	inside := func(p, dir string) bool {
+		rel, err := filepath.Rel(dir, p)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	return inside(a, b) || inside(b, a)
+}
+
+// realPath resolves symbolic links in the longest existing prefix of path,
+// so that a directory that is not made yet can still be compared.
+func realPath(path string) string {
+	path = filepath.Clean(path)
+	rest := ""
+	for p := path; ; p = filepath.Dir(p) {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		if filepath.Dir(p) == p {
+			return path
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+	}
 }
 
 func (f *File) stateLocation(baseDir string) (StateLocation, error) {

@@ -59,6 +59,44 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestCertificateAuthoritySettings(t *testing.T) {
+	path := write(t, minimal)
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CADir != "" || s.CARoots != "" || s.CARootsDedicated {
+		t.Errorf("a CA without ca_dir: %q %q %v", s.CADir, s.CARoots, s.CARootsDedicated)
+	}
+	if s.X509SVIDTTL != DefaultX509SVIDTTL || DefaultX509SVIDTTL != time.Hour {
+		t.Errorf("x509_svid_ttl = %s, want the default hour", s.X509SVIDTTL)
+	}
+
+	path = write(t, minimal+"ca_dir: ca\nca_roots: roots.pem\nca_roots_dedicated: true\nx509_svid_ttl: 24h\n")
+	if s, err = Load(path); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	if s.CADir != filepath.Join(dir, "ca") || s.CARoots != filepath.Join(dir, "roots.pem") || !s.CARootsDedicated || s.X509SVIDTTL != 24*time.Hour {
+		t.Errorf("CA settings = %q %q %v %s", s.CADir, s.CARoots, s.CARootsDedicated, s.X509SVIDTTL)
+	}
+	if _, err := Load(write(t, minimal+"ca_dir: /var/lib/ca\nx509_svid_ttl: 10m\n")); err != nil {
+		t.Errorf("the shortest lifetime and an absolute ca_dir: %v", err)
+	}
+	// Sibling directories with a common prefix are not nested.
+	if _, err := Load(write(t, minimal+"ca_dir: keys-ca\n")); err != nil {
+		t.Errorf("keys-ca beside keys: %v", err)
+	}
+	// spiffex check reads the settings without requiring the directories.
+	f, err := Decode([]byte("issuer: https://issuer.example.org\ntrust_domain: example.org\nca_dir: ca\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Check(); err != nil {
+		t.Error(err)
+	}
+}
+
 func TestLoadEverything(t *testing.T) {
 	s, err := Load(write(t, `
 issuer: https://issuer.example.org
@@ -127,6 +165,14 @@ func TestLoadErrors(t *testing.T) {
 		"no trust domain":           strings.Replace(minimal, "trust_domain: example.org", "", 1),
 		"bad issuer URL":            strings.Replace(minimal, "https://issuer.example.org", "https://issuer.example.org/", 1),
 		"two documents":             minimal + "---\nissuer: x\n",
+		"X.509-SVID TTL too short":  minimal + "x509_svid_ttl: 9m\n",
+		"X.509-SVID TTL over a day": minimal + "x509_svid_ttl: 25h\n",
+		"ca_roots without ca_dir":   minimal + "ca_roots: roots.pem\n",
+		"dedicated without ca_dir":  minimal + "ca_roots_dedicated: true\n",
+		"dedicated without roots":   minimal + "ca_dir: ca\nca_roots_dedicated: true\n",
+		"ca_dir is keys_dir":        minimal + "ca_dir: keys\n",
+		"ca_dir inside keys_dir":    minimal + "ca_dir: keys/ca\n",
+		"keys_dir inside ca_dir":    strings.Replace(minimal, "keys_dir: keys", "keys_dir: ca/keys", 1) + "ca_dir: ca\n",
 		"empty":                     "",
 	}
 	for name, content := range cases {
@@ -150,5 +196,32 @@ func TestValidationAlone(t *testing.T) {
 	}
 	if len(s.ReadableFiles) != 0 {
 		t.Errorf("readable_files: [] kept the defaults: %v", s.ReadableFiles)
+	}
+}
+
+// A symbolic link does not hide that two directories are one.
+func TestCADirOverlapSeesThroughLinks(t *testing.T) {
+	keys := t.TempDir()
+	link := filepath.Join(t.TempDir(), "ca")
+	if err := os.Symlink(keys, link); err != nil {
+		t.Fatal(err)
+	}
+	content := "issuer: https://issuer.example.org\ntrust_domain: example.org\nstate: { file: state.yaml }\n"
+	if _, err := Load(write(t, content+"keys_dir: "+keys+"\nca_dir: "+link+"\n")); err == nil {
+		t.Error("ca_dir, a link to keys_dir, was accepted")
+	}
+	inside := filepath.Join(keys, "sub")
+	if err := os.Mkdir(inside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Symlink(inside, other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(write(t, content+"keys_dir: "+keys+"\nca_dir: "+other+"/ca\n")); err == nil {
+		t.Error("a ca_dir to be made inside keys_dir through a link was accepted")
+	}
+	if _, err := Load(write(t, content+"keys_dir: "+keys+"\nca_dir: "+t.TempDir()+"\n")); err != nil {
+		t.Errorf("separate directories: %v", err)
 	}
 }

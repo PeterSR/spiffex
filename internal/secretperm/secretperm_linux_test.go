@@ -143,3 +143,26 @@ func TestCheckFilesSkipsHiddenEntries(t *testing.T) {
 		t.Error("a TLS key readable by everyone was accepted")
 	}
 }
+
+// A directory that holds public certificates beside private keys is judged
+// by its keys alone.
+func TestCheckFilesWithSuffixJudgesOnlyThoseFiles(t *testing.T) {
+	verifier := User{UID: uint32(os.Getuid()) + 1000, GID: uint32(os.Getgid()) + 1000}
+	dir := t.TempDir()
+	writeKey(t, dir, "ca-1.key", 0o600)
+	writeKey(t, dir, "ca-1.crt", 0o644)
+	if err := CheckFilesWithSuffix(verifier, dir, ".key"); err != nil {
+		t.Errorf("a public certificate was judged: %v", err)
+	}
+	if err := CheckFiles(verifier, dir); err == nil {
+		t.Error("CheckFiles should judge every file")
+	}
+	writeKey(t, dir, "ca-2.key", 0o640)
+	if err := CheckFilesWithSuffix(verifier, dir, ".key"); err != nil {
+		t.Errorf("a key readable by a group the user is not in: %v", err)
+	}
+	writeKey(t, dir, "ca-3.key", 0o644)
+	if err := CheckFilesWithSuffix(verifier, dir, ".key"); err == nil {
+		t.Error("a key readable by everyone was accepted")
+	}
+}

@@ -91,7 +91,11 @@ func yamlString(s string) string {
 	return string(data)
 }
 
-func newTokenFixture(t *testing.T) *tokenFixture {
+func newTokenFixture(t *testing.T) *tokenFixture { return newTokenFixtureWith(t, nil) }
+
+// newTokenFixtureWith lets mutate change the issuer's configuration before
+// the issuer is made.
+func newTokenFixtureWith(t *testing.T, mutate func(f *tokenFixture, cfg *Config)) *tokenFixture {
 	t.Helper()
 	f := &tokenFixture{now: time.Now()}
 	var err error
@@ -135,6 +139,23 @@ origins:
     audiences: [orders, ` + f.srv.URL + `/manage]
     members:
       narrow: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
+  xonly:
+    provider: keys
+    svid_types: [x509]
+    members:
+      xonly: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
+  narrowx:
+    provider: keys
+    audiences: [orders]
+    svid_types: [jwt, x509]
+    members:
+      narrowx: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
+  kube-x509:
+    provider: cluster
+    svid_types: [x509]
+  kube-jwt:
+    provider: cluster
+    svid_types: [jwt]
   kube:
     provider: cluster
   kube-staging:
@@ -161,7 +182,7 @@ providers:
 	}
 	s := state.DefaultSettings(f.srv.URL, td)
 	s.Verifiers = [][]string{{exe, "verifier"}}
-	p := policy.New(policy.Options{Settings: s})
+	p := policy.New(policy.Options{Settings: s, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err := p.Apply(&store.Snapshot{Version: "v1", State: st}); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +190,7 @@ providers:
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.iss, err = New(Config{
+	cfg := Config{
 		URL:         f.srv.URL,
 		TrustDomain: td,
 		Keys:        staticKeys{set: set, seq: 1},
@@ -177,7 +198,11 @@ providers:
 		Verifiers:   runner,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Now:         func() time.Time { return f.now },
-	})
+	}
+	if mutate != nil {
+		mutate(f, &cfg)
+	}
+	f.iss, err = New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,6 +519,36 @@ func TestRefusedAudienceConsumesAssertion(t *testing.T) {
 	}
 	if resp := f.post(t, f.form("narrow/narrow", assertion, "orders")); resp.status != http.StatusUnauthorized {
 		t.Fatalf("reusing the assertion: status %d, want 401", resp.status)
+	}
+}
+
+// An origin whose svid_types lacks jwt is refused a JWT-SVID after
+// authentication, which consumes the assertion; origins without the field
+// are unchanged.
+func TestSVIDTypesRefuseJWTSVID(t *testing.T) {
+	f := newTokenFixture(t)
+	assertion := sign(t, f.ecKey, jose.ES256, f.claims("xonly/xonly"))
+	resp := f.post(t, f.form("xonly/xonly", assertion, "orders"))
+	if resp.status != http.StatusBadRequest || resp.body["error"] != "invalid_target" {
+		t.Fatalf("client credentials: status %d, body %v; want 400 invalid_target", resp.status, resp.body)
+	}
+	if resp.body["error_description"] != errSVIDTypeNotPermitted.Description {
+		t.Errorf("error_description %v, want the SVID type text", resp.body["error_description"])
+	}
+	if resp := f.post(t, f.form("xonly/xonly", assertion, "orders")); resp.status != http.StatusUnauthorized {
+		t.Errorf("reusing the assertion: status %d, want 401", resp.status)
+	}
+
+	exchanged := f.post(t, exchangeForm(f.serviceAccountToken(t, "shop", time.Hour, f.iss.URL()+"/origins/kube-x509"), TokenTypeJWT))
+	if exchanged.status != http.StatusBadRequest || exchanged.body["error"] != "invalid_target" {
+		t.Errorf("token exchange: status %d, body %v; want 400 invalid_target", exchanged.status, exchanged.body)
+	}
+
+	for _, clientID := range []string{"vms/billing", "narrow/narrow"} {
+		ok := f.post(t, f.form(clientID, sign(t, f.ecKey, jose.ES256, f.claims(clientID)), "orders"))
+		if ok.status != http.StatusOK {
+			t.Errorf("%s: status %d, body %v; want 200", clientID, ok.status, ok.body)
+		}
 	}
 }
 

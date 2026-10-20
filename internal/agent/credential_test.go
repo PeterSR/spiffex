@@ -65,7 +65,10 @@ func TestSubjectTokenCommandLeavesNothing(t *testing.T) {
 	}
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	// The command waits until the test watches its background process.
-	script := `sleep 60 & echo $! > "$0"; while [ ! -e "$0.ack" ]; do sleep 0.01; done; echo token`
+	// The wait is bounded, and the test acks on its way out, so a failure
+	// before the ack cannot leave the shell polling for good.
+	script := `sleep 60 & echo $! > "$0"; i=0; while [ ! -e "$0.ack" ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i+1)); done; echo token`
+	t.Cleanup(func() { _ = os.WriteFile(pidFile+".ack", nil, 0o600) })
 	done := make(chan error, 1)
 	go func() {
 		_, err := (SubjectToken{Command: []string{sh, "-c", script, pidFile}}).grantParams("", time.Now())

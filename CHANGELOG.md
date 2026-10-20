@@ -7,6 +7,117 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-20
+
+This release adds X.509-SVIDs: an issuer with a certificate authority hands out short-lived
+certificates next to JWT-SVIDs, and the agent serves a complete Workload API. An issuer without
+`ca_dir` still issues JWT-SVIDs only. [docs/x509.md](docs/x509.md) is the guide. Read "Changed"
+before upgrading: several behaviours differ for issuers and agents that have no CA too.
+
+### Added
+
+- X.509-SVIDs. The specification gains a certificate authority next to the JWT signing keys (SPEC
+  section 2.5), X.509 authorities in the SPIFFE bundle (section 2.3), token requests that take a
+  `requested_token_type` and a `csr` (section 3.4), `svid_types` on origins and providers (section
+  4.5), and a complete Workload API server in the agent (section 9). The state accepts and checks
+  `svid_types`, and the token endpoint refuses a JWT-SVID to an origin whose list lacks `jwt`
+  (`invalid_target`, after authentication).
+- The certificate authority. The settings `ca_dir`, `ca_roots`, `ca_roots_dedicated` and
+  `x509_svid_ttl` give the issuer a CA: a root it holds, or an intermediate under the operator's own
+  root. The issuer checks every CA certificate against the profile of SPEC section 2.5 (name
+  constraints included), picks the signing CA with the rotation rules of the signing keys, rereads
+  the directory while it runs, and publishes the trust anchors in the SPIFFE bundle as X.509
+  authorities (`use: x509-svid`, with `x5c`), counted into `spiffe_sequence`. The JWKS never holds
+  them. Discovery says `spiffex_x509_svid_supported: true` while a CA can sign. `spiffex ca init`,
+  `csr`, `import`, `list` and `prune` make and manage the CA files.
+- The token endpoint issues X.509-SVIDs. A client credentials or token exchange request with
+  `requested_token_type=urn:spiffex:token-type:x509-svid` and a `csr` (DER, base64url) gets the
+  certificate chain in `access_token` (leaf first, then any intermediates; the root is never sent),
+  for the SPIFFE ID the origin would have named in a JWT-SVID.
+  Only the CSR's public key is used (ECDSA P-256 or P-384, Ed25519, or RSA of 2048 to 4096 bits).
+  The certificate has the subject `O=<trust domain>, CN=<SPIFFE ID>` (each left out when over 64
+  characters), one URI SAN, the extended key usages `serverAuth` and `clientAuth`, and the lifetime
+  `x509_svid_ttl` (one hour by default, 10 minutes to 24 hours), shortened where the CA's chain ends
+  sooner. A `csr` without the X.509 type and an unknown `requested_token_type` are `invalid_request`.
+  Each certificate is logged with its serial number, at every `-log-level`: with no revocation the
+  log is the only record.
+- `svid_types` on origins and providers chooses which kinds of SVID an origin issues. `spiffex check`
+  and `POST /manage/check` (`x509_under_restriction`) report origins that list `x509` under an audience
+  restriction, which does not cover their X.509-SVIDs.
+- `spiffex token -x509 -key-out FILE -cert-out FILE [-bundle-out FILE]` fetches an X.509-SVID for a
+  new P-256 key made in memory, verifies the chain against the bundle, and writes the files with
+  mode 0600 for the key and never over an existing file.
+- The agent serves X.509-SVIDs over the Workload API when the issuer has a CA. `FetchX509SVID`
+  streams the workload's chain, a PKCS#8 key made in memory for each certificate, and the trust
+  domain's X.509 bundle. The certificate is renewed at a random 40 to 50 percent of its life, sent to
+  every open stream, and never sent with under a tenth of its life left. The agent retries with
+  jittered backoff while the issuer is down and remembers an issuer's refusal for a minute
+  (`PermissionDenied`, so a JWT-only origin keeps its JWT-SVIDs). `FetchX509Bundles` streams the
+  roots. Against an issuer without a CA the X.509 calls answer `Unimplemented`; the agent rereads the
+  discovery flag at each bundle refresh.
+- The conformance matrix covers X.509-SVIDs: SVIDs from go-spiffe, py-spiffe, `spiffex token -x509`
+  and, for P-384, Ed25519 and RSA-2048 keys, a new `conformance/goissue` command are accepted by
+  go-spiffe chain verification and by mTLS handshakes with go-spiffe and with Python's `ssl`, in both
+  directions, and every verifier refuses the SVID of an issuer in another trust domain.
+  `test/e2e/kind-x509.sh` (`make e2e-x509`) runs two pods over mTLS on a kind cluster, including a CA
+  rotation that drops no connection.
+- The Helm chart takes a CA. `ca.existingSecret` is mounted at `ca_dir` with mode 0440 like the
+  signing keys, `ca.roots.configMap` or `ca.roots.secret` (with `ca.roots.key`) supplies `ca_roots`,
+  `ca.rootsDedicated` sets `ca_roots_dedicated`, and `x509SVIDTTL` sets `x509_svid_ttl`. The chart
+  refuses roots without a CA, both kinds of roots, and `readableFiles` under `/ca` or `/ca-roots`.
+  Replacing the Secret rotates the CA without a restart.
+
+### Changed
+
+- **Removing the last JWT signing key now stops JWT signing.** Until now the running issuer kept the
+  removed key and went on signing with it. Now, once a second poll also finds no key file in
+  `keys_dir`, the issuer logs an error and keeps running without a JWT key: the token endpoint
+  answers a JWT-SVID request with `invalid_request` ("this issuer issues no JWT-SVIDs"), the JWKS and
+  the bundle publish no JWT key, and the management API admits nobody until a key is added. X.509-SVIDs
+  are unaffected. `spiffex key add` signs at once. This is the compromise response, so do not
+  empty `keys_dir` for any other reason.
+- **Discovery lists ES256 and RS256 as the signing algorithms even when the key set is empty**, so
+  that relying parties that cache the list once keep working when a key returns.
+- **The agent sends an empty JWT bundle on revocation.** When the last JWT key is gone, open
+  `FetchJWTBundles` streams receive the empty set instead of keeping the last good one, and the
+  agent drops cached JWT-SVIDs whose signing key has left the bundle, for every key removal.
+  Workloads that hold a stream see their trusted JWT keys disappear, by design.
+- **`FetchBundle`, and so `spiffex token`, accepts a bundle with X.509 authorities and no JWT
+  authority**, and the issuer may serve one with `"keys": []` when every key and CA file is gone;
+  the agent takes both. A bundle whose `keys` is missing or `null` is still refused.
+- **An issuer with a `ca_dir` starts with an empty `keys_dir`**, logging an error and issuing
+  X.509-SVIDs only until a JWT key appears. Without a CA it still refuses to start.
+- **Turning on a CA gives every origin X.509-SVIDs**, because `svid_types` defaults to `[jwt, x509]`
+  (an origin with an audience restriction defaults to `[jwt]`). Set `svid_types: [jwt]` on an origin,
+  or on a provider, that should not get certificates. The shipped providers set no default.
+- **The bundle can now contain `use: x509-svid` keys.** Consumers of `/bundle` that took every key to
+  be a JWT key must filter on `use`. The JWKS is unchanged.
+- **An agent run with `-subject-token-command` becomes a child subreaper** and sweeps what the
+  command leaves behind every 10 seconds, as the issuer does for verifier programs. In a container
+  this makes it adopt orphans.
+- **Client credentials requests now honour `requested_token_type`.** 0.1.3 ignored it, and a `csr`,
+  on that grant. Now any value other than the JWT and X.509-SVID token types, or a `csr` without
+  the X.509 type, is `invalid_request`. A client that sends another `requested_token_type` breaks on
+  upgrade.
+- `FetchJWTBundles` no longer repeats an unchanged bundle when only the X.509 roots changed.
+- The module now depends on `filippo.io/edwards25519`. The chart's description mentions X.509-SVIDs.
+
+### Security
+
+- A stolen CA key is confined by the name constraints every CA certificate must carry: it can
+  certify only the URI `<trust domain>`, no other trust domain, DNS name, IP address or mailbox. A
+  root you bring in `ca_roots` must carry them too or be declared dedicated with
+  `ca_roots_dedicated`; the issuer refuses to start otherwise.
+- The compromise response for a CA is deleting its key file: a CA certificate without a key never
+  signs, and the same holds for the last one, which also survives a restart.
+- Only the public key of a CSR reaches the certificate, never its subject, names or extensions. A key
+  the issuer uses as a CA, JWT signing or member key is refused, and so is an Ed25519 key of small
+  order or in a non-canonical encoding, for which a signature can be forged without the private key.
+- With `verifier_user` the issuer refuses to start if that user can read a CA key, and stops
+  signing with a CA key that becomes readable to it.
+- An X.509-SVID cannot be revoked and never authenticates to the management API, which accepts only
+  JWT-SVIDs addressed to it. Lifetimes are capped at 24 hours.
+
 ## [0.1.3] - 2026-10-19
 
 ### Changed
@@ -129,7 +240,8 @@ The first version: an issuer, an agent and the `spiffex` command, following vers
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
 
-[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.2.0
 [0.1.3]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.3
 [0.1.3-rc.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.3-rc.1
 [0.1.2]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.2

@@ -6,6 +6,8 @@
 //	goclient validate-source AUDIENCE TOKEN         against a JWTSource's bundle
 //	goclient validate-bundle URL TD AUDIENCE TOKEN  against the issuer's bundle endpoint
 //
+// and the x509-* commands of x509.go for X.509-SVIDs.
+//
 // It exits 3 when a token is refused, and 1 on any other failure, so a test
 // can tell a refusal from a verifier that is down.
 package main
@@ -39,7 +41,9 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	fmt.Println(out)
+	if out != "" {
+		fmt.Println(out)
+	}
 }
 
 func run(ctx context.Context, args []string) (string, error) {
@@ -98,5 +102,5 @@ func run(ctx context.Context, args []string) (string, error) {
 		}
 		return svid.ID.String(), nil
 	}
-	return "", fmt.Errorf("bad arguments %q", args)
+	return runX509(ctx, args)
 }

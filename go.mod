@@ -3,6 +3,7 @@ module github.com/PeterSR/spiffex
 go 1.26.0
 
 require (
+	filippo.io/edwards25519 v1.1.0
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spiffe/go-spiffe/v2 v2.9.0

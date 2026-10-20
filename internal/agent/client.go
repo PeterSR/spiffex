@@ -11,9 +11,12 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/spiffe/go-spiffe/v2/bundle/spiffebundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
@@ -42,6 +45,9 @@ type IssuerClient struct {
 	tokenEndpoint  string
 	bundleEndpoint string
 	trustDomain    spiffeid.TrustDomain
+	// x509Supported is the discovery document's spiffex_x509_svid_supported,
+	// read again at each bundle refresh.
+	x509Supported atomic.Bool
 }
 
 // RejectedError is returned when the issuer refused a token request, as
@@ -93,12 +99,7 @@ func Discover(ctx context.Context, issuerURL string, trustDomain spiffeid.TrustD
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
-	var doc struct {
-		Issuer         string `json:"issuer"`
-		TokenEndpoint  string `json:"token_endpoint"`
-		BundleEndpoint string `json:"spiffe_bundle_endpoint"`
-		TrustDomain    string `json:"spiffe_trust_domain"`
-	}
+	var doc discoveryDocument
 	if err := getJSON(ctx, &client, issuerURL+"/.well-known/openid-configuration", &doc); err != nil {
 		return nil, fmt.Errorf("discovery: %w", err)
 	}
@@ -117,13 +118,46 @@ func Discover(ctx context.Context, issuerURL string, trustDomain spiffeid.TrustD
 	if !trustDomain.IsZero() && trustDomain != announced {
 		return nil, configErrorf("discovery: issuer serves trust domain %s, configured %s", announced, trustDomain)
 	}
-	return &IssuerClient{
+	c := &IssuerClient{
 		issuerURL:      issuerURL,
 		httpClient:     &client,
 		tokenEndpoint:  doc.TokenEndpoint,
 		bundleEndpoint: doc.BundleEndpoint,
 		trustDomain:    announced,
-	}, nil
+	}
+	c.x509Supported.Store(doc.X509SVIDSupported)
+	return c, nil
+}
+
+// discoveryDocument is the part of the issuer's discovery document the agent
+// reads.
+type discoveryDocument struct {
+	Issuer            string `json:"issuer"`
+	TokenEndpoint     string `json:"token_endpoint"`
+	BundleEndpoint    string `json:"spiffe_bundle_endpoint"`
+	TrustDomain       string `json:"spiffe_trust_domain"`
+	X509SVIDSupported bool   `json:"spiffex_x509_svid_supported"`
+}
+
+// X509Supported reports whether the issuer announced X.509-SVIDs when it was
+// last asked.
+func (c *IssuerClient) X509Supported() bool { return c.x509Supported.Load() }
+
+// refreshX509Support asks discovery again whether the issuer issues
+// X.509-SVIDs, and reports whether the answer changed. A CA added to or
+// removed from a running issuer changes it; nothing else in the document is
+// reread.
+func (c *IssuerClient) refreshX509Support(ctx context.Context) (changed bool, err error) {
+	var doc discoveryDocument
+	if err := getJSON(ctx, c.httpClient, c.issuerURL+"/.well-known/openid-configuration", &doc); err != nil {
+		return false, fmt.Errorf("discovery: %w", err)
+	}
+	// A body that is not this issuer's document (a proxy's error page, a
+	// replica of something else) must not withdraw the support.
+	if doc.Issuer != c.issuerURL {
+		return false, fmt.Errorf("discovery: issuer %q does not match %q, keeping the previous answer", doc.Issuer, c.issuerURL)
+	}
+	return c.x509Supported.Swap(doc.X509SVIDSupported) != doc.X509SVIDSupported, nil
 }
 
 func checkIssuerURL(raw string) error {
@@ -162,6 +196,8 @@ type Token struct {
 	SPIFFEID spiffeid.ID
 	Expires  time.Time
 	Lifetime time.Duration
+	// KeyID is the kid of the key that signed the token.
+	KeyID string
 }
 
 // FetchToken requests a JWT-SVID for the audiences.
@@ -175,32 +211,9 @@ func (c *IssuerClient) FetchToken(ctx context.Context, cred Credential, audience
 	}
 	form["audience"] = audiences
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenEndpoint, strings.NewReader(form.Encode()))
+	body, err := c.postToken(ctx, form)
 	if err != nil {
 		return Token{}, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return Token{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	if err != nil {
-		return Token{}, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var oe struct {
-			Code        string `json:"error"`
-			Description string `json:"error_description"`
-		}
-		refused := (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) &&
-			json.Unmarshal(body, &oe) == nil && slices.Contains(refusalCodes, oe.Code)
-		if refused {
-			return Token{}, &RejectedError{Code: oe.Code, Description: truncate(oe.Description, maxDescription)}
-		}
-		return Token{}, fmt.Errorf("token endpoint: %s", resp.Status)
 	}
 	var tr struct {
 		AccessToken string `json:"access_token"`
@@ -221,10 +234,50 @@ func (c *IssuerClient) FetchToken(ctx context.Context, cred Credential, audience
 	if !svid.Expiry.After(now) {
 		return Token{}, errors.New("token endpoint: issued an expired token")
 	}
-	return Token{Value: tr.AccessToken, SPIFFEID: svid.ID, Expires: svid.Expiry, Lifetime: svid.Expiry.Sub(now)}, nil
+	var kid string
+	if parsed, err := jwt.ParseSigned(tr.AccessToken, []jose.SignatureAlgorithm{jose.ES256, jose.RS256}); err == nil && len(parsed.Headers) == 1 {
+		kid = parsed.Headers[0].KeyID
+	}
+	return Token{Value: tr.AccessToken, SPIFFEID: svid.ID, Expires: svid.Expiry, Lifetime: svid.Expiry.Sub(now), KeyID: kid}, nil
 }
 
-// FetchBundle fetches the trust domain's SPIFFE bundle.
+// postToken sends one token request and returns the body of a successful
+// response.
+func (c *IssuerClient) postToken(ctx context.Context, form url.Values) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var oe struct {
+			Code        string `json:"error"`
+			Description string `json:"error_description"`
+		}
+		refused := (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) &&
+			json.Unmarshal(body, &oe) == nil && slices.Contains(refusalCodes, oe.Code)
+		if refused {
+			return nil, &RejectedError{Code: oe.Code, Description: truncate(oe.Description, maxDescription)}
+		}
+		return nil, fmt.Errorf("token endpoint: %s", resp.Status)
+	}
+	return body, nil
+}
+
+// FetchBundle fetches the trust domain's SPIFFE bundle. A bundle with only
+// X.509 authorities is fine (an issuer whose JWT keys were all removed), as
+// is one with only JWT authorities, and one with an empty key list (an issuer
+// that lost every key and CA file), which is a revocation and not an error.
 func (c *IssuerClient) FetchBundle(ctx context.Context) (*spiffebundle.Bundle, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
@@ -247,9 +300,6 @@ func (c *IssuerClient) FetchBundle(ctx context.Context) (*spiffebundle.Bundle, e
 	bundle, err := spiffebundle.Parse(c.trustDomain, body)
 	if err != nil {
 		return nil, fmt.Errorf("bundle endpoint: %w", err)
-	}
-	if len(bundle.JWTAuthorities()) == 0 {
-		return nil, errors.New("bundle endpoint: the bundle has no JWT authorities")
 	}
 	return bundle, nil
 }

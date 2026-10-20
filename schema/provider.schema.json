@@ -25,7 +25,14 @@
       "description": "The default name template.",
       "type": "string"
     },
-    "audiences": { "$ref": "#/$defs/patterns" }
+    "audiences": { "$ref": "#/$defs/patterns" },
+    "svid_types": {
+      "description": "The default for the origin's svid_types; it does not apply to an origin with an audience restriction (SPEC section 4.5).",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["jwt", "x509"] }
+    }
   },
   "$defs": {
     "param": {

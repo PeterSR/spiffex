@@ -1,0 +1,9 @@
+# A CA for X.509-SVIDs: an intermediate under roots from a ConfigMap, and a shorter lifetime.
+trustDomain: example.org
+signingKeys: { existingSecret: keys }
+tls: { existingSecret: tls }
+x509SVIDTTL: 30m
+ca:
+  existingSecret: ca
+  roots: { configMap: ca-roots }
+  rootsDedicated: true

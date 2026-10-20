@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
@@ -126,5 +127,34 @@ func TestDiscoverRejects(t *testing.T) {
 	}
 	if _, err := Discover(context.Background(), serve(good), spiffeid.RequireTrustDomainFromString("example.org"), nil); err != nil {
 		t.Fatalf("matching trust domain: %v", err)
+	}
+}
+
+// An issuer whose JWT keys were all removed still serves a bundle with its
+// X.509 authorities, and the client takes it; a bundle with no authority of
+// either kind is refused.
+func TestFetchBundleAcceptsAnX509OnlyBundle(t *testing.T) {
+	fake := newFakeX509Issuer(t, time.Hour)
+	client, err := Discover(context.Background(), fake.srv.URL, td, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := client.FetchBundle(context.Background())
+	if err != nil || len(bundle.JWTAuthorities()) != 1 || len(bundle.X509Authorities()) != 1 {
+		t.Fatalf("both kinds: %v", err)
+	}
+
+	fake.withoutJWT.Store(true)
+	bundle, err = client.FetchBundle(context.Background())
+	if err != nil {
+		t.Fatalf("an X.509-only bundle: %v", err)
+	}
+	if len(bundle.JWTAuthorities()) != 0 || len(bundle.X509Authorities()) != 1 {
+		t.Errorf("%d JWT and %d X.509 authorities", len(bundle.JWTAuthorities()), len(bundle.X509Authorities()))
+	}
+
+	fake.supported.Store(false)
+	if _, err := client.FetchBundle(context.Background()); err == nil {
+		t.Errorf("a bundle with no authority: %v", err)
 	}
 }

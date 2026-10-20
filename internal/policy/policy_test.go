@@ -216,3 +216,32 @@ func TestStaleReloadCannotUndoAWrite(t *testing.T) {
 		t.Error("a current reload was refused")
 	}
 }
+
+func TestX509UnderRestrictionWarnsOnlyWhenIntroduced(t *testing.T) {
+	const marker = "does not cover"
+	loud := "origins: { a: { provider: keys, audiences: [orders], svid_types: [jwt, x509] } }\n"
+	p, log := newPolicy(t)
+	if err := p.Apply(snapshot(t, "v1", loud)); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Apply(snapshot(t, "v2", loud+"# unchanged\n")); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(log.String(), marker); n != 1 {
+		t.Errorf("%d warnings for an unchanged reload, want 1:\n%s", n, log)
+	}
+
+	p, log = newPolicy(t)
+	if err := p.Apply(snapshot(t, "v1", "origins: { a: { provider: keys, svid_types: [jwt, x509] } }\n")); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(log.String(), marker) {
+		t.Errorf("warned without a restriction:\n%s", log)
+	}
+	if err := p.Apply(snapshot(t, "v2", loud)); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(log.String(), marker); n != 1 {
+		t.Errorf("%d warnings after the restriction was introduced, want 1:\n%s", n, log)
+	}
+}

@@ -18,6 +18,7 @@ import (
 
 	"github.com/PeterSR/spiffex/internal/agent"
 	"github.com/PeterSR/spiffex/internal/keyset"
+	"github.com/PeterSR/spiffex/internal/procgroup"
 )
 
 // credentialSynopsis is how the credential flags combine.
@@ -173,6 +174,15 @@ func runAgent(ctx context.Context, args []string) error {
 	cred, err := creds.credential()
 	if err != nil {
 		return err
+	}
+
+	if *creds.subjectTokenCommand != "" {
+		// As the issuer does for verifiers: what a command leaves behind after
+		// setsid is adopted and reaped here, also when the agent is a container's init.
+		if err := procgroup.BecomeSubreaper(); err != nil {
+			logger.Warn("cannot adopt what the subject token command leaves behind", "error", err)
+		}
+		go sweepOrphans(ctx, 10*time.Second)
 	}
 
 	client, err := discoverWithRetry(ctx, creds, logger)

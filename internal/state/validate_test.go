@@ -553,6 +553,9 @@ func TestValidateGoBuiltStates(t *testing.T) {
 	}{
 		{"nil state", nil, "there is no state"},
 		{"empty audiences", &State{Providers: map[string]*Provider{"p": {Proof: Proof{Keys: &KeysProof{}}, Audiences: &Strings{}}}}, "exactly one value"},
+		{"unknown svid type", &State{Origins: map[string]*Origin{"a": {Provider: "keys", SVIDTypes: []string{"saml"}}}}, "value must be one of"},
+		{"empty svid_types", &State{Origins: map[string]*Origin{"a": {Provider: "keys", SVIDTypes: []string{}}}}, "minItems"},
+		{"repeated svid type", &State{Providers: map[string]*Provider{"p": {Proof: Proof{Keys: &KeysProof{}}, SVIDTypes: []string{"jwt", "jwt"}}}}, "are equal"},
 		{"nil origin", &State{Origins: map[string]*Origin{"a": nil}}, "want object"},
 		{"nil provider", &State{Providers: map[string]*Provider{"p": nil}}, "want object"},
 		{"nil param", &State{Providers: map[string]*Provider{"p": {Proof: Proof{Keys: &KeysProof{}}, Params: map[string]*Param{"x": nil}}}}, "want object"},

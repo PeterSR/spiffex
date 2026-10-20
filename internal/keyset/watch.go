@@ -36,19 +36,38 @@ type Watcher struct {
 	// stay exposed while they stay in the directory, whatever later checks
 	// say: someone may have read them meanwhile.
 	exposed map[string]bool
+	// sawNoKeys is true after a poll that found no key file while keys were
+	// in service.
+	sawNoKeys bool
 }
 
-// NewWatcher loads dir once and fails if that fails: an issuer must not start
-// without keys. A nil logger means slog.Default.
+// NewWatcher loads dir once and fails if that fails, a directory with no key
+// files included. A nil logger means slog.Default.
 func NewWatcher(dir string, logger *slog.Logger) (*Watcher, error) {
 	return newWatcher(dir, logger, time.Now)
 }
 
+// NewWatcherAllowingNoKeys is NewWatcher for an issuer that has something
+// else to publish, the X.509 anchors: a directory with no key files then
+// starts an issuer that issues no JWT-SVIDs, the state a running issuer is in
+// after its last key was removed. Any other failure still fails.
+func NewWatcherAllowingNoKeys(dir string, logger *slog.Logger) (*Watcher, error) {
+	return openWatcher(dir, logger, time.Now, true)
+}
+
 func newWatcher(dir string, logger *slog.Logger, now func() time.Time) (*Watcher, error) {
+	return openWatcher(dir, logger, now, false)
+}
+
+func openWatcher(dir string, logger *slog.Logger, now func() time.Time, allowNoKeys bool) (*Watcher, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	set, err := LoadDir(dir)
+	if errors.Is(err, ErrNoKeys) && allowNoKeys {
+		logger.Error("no signing key in the keys directory: no JWT-SVIDs are issued until one is added", "dir", dir)
+		set, err = EmptySet(), nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +119,10 @@ func (w *Watcher) CheckNewKeys(check func(path string) error) {
 
 // Run polls the directory until ctx is done. A directory that fails to load
 // keeps the previous set in service: losing all keys because of a half-written
-// file would take the issuer down.
+// file would take the issuer down. A directory that loads with no key file at
+// all is different: removing the last key is how a compromised one is taken
+// out of service, so the set becomes empty and nothing signs until a key is
+// added, once two polls in a row have seen the directory empty.
 func (w *Watcher) Run(ctx context.Context, interval time.Duration) error {
 	if interval <= 0 {
 		return errors.New("poll interval must be positive")
@@ -121,6 +143,16 @@ func (w *Watcher) Run(ctx context.Context, interval time.Duration) error {
 // changed.
 func (w *Watcher) Reload() bool {
 	loaded, err := LoadDir(w.dir)
+	if errors.Is(err, ErrNoKeys) {
+		if !w.confirmNoKeys() {
+			return false
+		}
+		loaded, err = EmptySet(), nil
+	} else {
+		w.mu.Lock()
+		w.sawNoKeys = false
+		w.mu.Unlock()
+	}
 	if err != nil {
 		w.logger.Error("reloading signing keys failed, keeping the previous set", "dir", w.dir, "error", err)
 		return false
@@ -166,10 +198,15 @@ func (w *Watcher) Reload() bool {
 			delete(w.exposed, id)
 		}
 	}
-	set, err := NewSet(keys)
-	if err != nil {
-		w.logger.Error("reloading signing keys failed, keeping the previous set", "dir", w.dir, "error", err)
-		return false
+	// Keys that were all left out by the check leave nothing to sign with,
+	// as an empty directory does.
+	set := EmptySet()
+	if len(keys) > 0 {
+		var err error
+		if set, err = NewSet(keys); err != nil {
+			w.logger.Error("reloading signing keys failed, keeping the previous set", "dir", w.dir, "error", err)
+			return false
+		}
 	}
 
 	publishedChanged := !slices.Equal(set.IDs(), w.set.IDs())
@@ -179,8 +216,27 @@ func (w *Watcher) Reload() bool {
 		close(w.changed)
 		w.changed = make(chan struct{})
 		w.logger.Info("signing keys changed", "keys", len(keys), "sequence", w.sequence)
+		if set.Empty() {
+			w.logger.Error("no signing key is left: no JWT-SVIDs are issued until one is added", "dir", w.dir)
+		}
 	}
 	return publishedChanged
+}
+
+// confirmNoKeys reports whether an empty directory may empty the set. The
+// first poll that sees no key file only warns: a file renamed away and back
+// by an editor, or a volume remounting, shows an empty directory for a
+// moment, and one poll is not worth an outage. A set that is empty already
+// stays so at once.
+func (w *Watcher) confirmNoKeys() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.set.Empty() || w.sawNoKeys {
+		return true
+	}
+	w.sawNoKeys = true
+	w.logger.Warn("no JWT key file seen; stopping JWT signing if the next poll agrees", "dir", w.dir)
+	return false
 }
 
 func maxTime(a, b time.Time) time.Time {

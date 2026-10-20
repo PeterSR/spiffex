@@ -33,6 +33,8 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+
+	"github.com/PeterSR/spiffex/internal/rotation"
 )
 
 // timeLayout is the creation time format embedded in key file names.
@@ -84,6 +86,13 @@ type Set struct {
 	keys []Key
 }
 
+// ErrNoKeys is what LoadDir returns for a directory with no key files.
+var ErrNoKeys = errors.New("no key files")
+
+// EmptySet is the set of an issuer that has no signing key: it publishes and
+// signs nothing.
+func EmptySet() *Set { return &Set{} }
+
 // NewSet builds a set from keys in any order.
 func NewSet(keys []Key) (*Set, error) {
 	if len(keys) == 0 {
@@ -106,6 +115,10 @@ func NewSet(keys []Key) (*Set, error) {
 	return &Set{keys: sorted}, nil
 }
 
+// Empty reports whether the set has no key at all, which is not the same as
+// having keys that may not sign (they are all exposed).
+func (s *Set) Empty() bool { return len(s.keys) == 0 }
+
 // Keys returns every key in the set, oldest first.
 func (s *Set) Keys() []Key {
 	return append([]Key(nil), s.keys...)
@@ -122,26 +135,27 @@ func (s *Set) Keys() []Key {
 // the newest key created at least activationDelay ago, which after a rewrite
 // is the key that was signing before it; failing that, the oldest key.
 func (s *Set) Active(now time.Time, activationDelay time.Duration) (Key, bool) {
-	for i := len(s.keys) - 1; i >= 0; i-- {
-		if !s.keys[i].Exposed && s.keys[i].activated(now, activationDelay) {
-			return s.keys[i], true
-		}
+	i := s.activeIndex(now, activationDelay)
+	if i < 0 {
+		return Key{}, false
 	}
-	for i := len(s.keys) - 1; i >= 0; i-- {
-		if !s.keys[i].Exposed && !s.keys[i].Created.Add(activationDelay).After(now) {
-			return s.keys[i], true
-		}
-	}
-	for _, k := range s.keys {
-		if !k.Exposed {
-			return k, true
-		}
-	}
-	return Key{}, false
+	return s.keys[i], true
 }
 
-func (k Key) activated(now time.Time, activationDelay time.Duration) bool {
-	return !k.Published.Add(activationDelay).After(now)
+func (s *Set) activeIndex(now time.Time, activationDelay time.Duration) int {
+	candidates := rotation.Candidates(s.entries(), now, activationDelay)
+	if len(candidates) == 0 {
+		return -1
+	}
+	return candidates[0]
+}
+
+func (s *Set) entries() []rotation.Entry {
+	entries := make([]rotation.Entry, len(s.keys))
+	for i, k := range s.keys {
+		entries[i] = rotation.Entry{Created: k.Created, Published: k.Published, Exposed: k.Exposed}
+	}
+	return entries
 }
 
 // Retired returns the keys no verifier can need any more: keys the issuer
@@ -150,26 +164,13 @@ func (k Key) activated(now time.Time, activationDelay time.Duration) bool {
 // clock skew and the time it takes every issuer process to see a new key.
 // The active key and anything newer are never retired.
 func (s *Set) Retired(now time.Time, activationDelay, retention time.Duration) []Key {
-	active, ok := s.Active(now, activationDelay)
-	if !ok {
+	active := s.activeIndex(now, activationDelay)
+	if active < 0 {
 		return nil
 	}
 	var retired []Key
-	for i, k := range s.keys {
-		if k.ID == active.ID || !k.Created.Before(active.Created) {
-			break
-		}
-		// The earliest moment a newer key could have taken over from k.
-		var replaced time.Time
-		for _, newer := range s.keys[i+1:] {
-			at := newer.Published.Add(activationDelay)
-			if replaced.IsZero() || at.Before(replaced) {
-				replaced = at
-			}
-		}
-		if !replaced.Add(retention).After(now) {
-			retired = append(retired, k)
-		}
+	for _, i := range rotation.Retired(s.entries(), active, activationDelay, retention, now) {
+		retired = append(retired, s.keys[i])
 	}
 	return retired
 }
@@ -230,7 +231,7 @@ func LoadDir(dir string) (*Set, error) {
 		keys = append(keys, k)
 	}
 	if len(keys) == 0 {
-		return nil, fmt.Errorf("no key files (key-<YYYYMMDDTHHMMSSZ>.pem) in %s", dir)
+		return nil, fmt.Errorf("%w (key-<YYYYMMDDTHHMMSSZ>.pem) in %s", ErrNoKeys, dir)
 	}
 	return NewSet(keys)
 }
@@ -281,8 +282,22 @@ func Thumbprint(pub crypto.PublicKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum), nil
 }
 
-// ParsePrivateKey parses a PEM-encoded PKCS#8, SEC 1 or PKCS#1 private key.
+// ParsePrivateKey parses a PEM-encoded PKCS#8, SEC 1 or PKCS#1 private key
+// of a kind the issuer signs JWTs with.
 func ParsePrivateKey(data []byte) (crypto.Signer, error) {
+	signer, err := DecodePrivateKey(data)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := algorithmFor(signer); err != nil {
+		return nil, err
+	}
+	return signer, nil
+}
+
+// DecodePrivateKey parses a PEM-encoded PKCS#8, SEC 1 or PKCS#1 private key
+// without judging its type or size.
+func DecodePrivateKey(data []byte) (crypto.Signer, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
 		return nil, errors.New("no PEM block found")
@@ -307,9 +322,6 @@ func ParsePrivateKey(data []byte) (crypto.Signer, error) {
 	signer, ok := key.(crypto.Signer)
 	if !ok {
 		return nil, fmt.Errorf("unsupported private key type %T", key)
-	}
-	if _, err := algorithmFor(signer); err != nil {
-		return nil, err
 	}
 	return signer, nil
 }

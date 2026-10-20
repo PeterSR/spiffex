@@ -3,6 +3,7 @@
 package issuer
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -22,6 +24,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/bundle/spiffebundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
+	"github.com/PeterSR/spiffex/internal/ca"
 	"github.com/PeterSR/spiffex/internal/keyset"
 	"github.com/PeterSR/spiffex/internal/policy"
 	"github.com/PeterSR/spiffex/internal/settings"
@@ -44,12 +47,19 @@ const (
 const (
 	DefaultTokenTTL        = settings.DefaultTokenTTL
 	DefaultActivationDelay = settings.DefaultActivationDelay
+	DefaultX509SVIDTTL     = settings.DefaultX509SVIDTTL
 )
 
 // KeySource supplies the current signing keys and their sequence number.
 // keyset.Watcher implements it.
 type KeySource interface {
 	Current() (set *keyset.Set, sequence uint64, changed <-chan struct{})
+}
+
+// CASource supplies the current certificate authority and the sequence number
+// of its published anchors. ca.Watcher implements it.
+type CASource interface {
+	Current() (set *ca.Set, sequence uint64, changed <-chan struct{})
 }
 
 // PolicySource supplies the state in service. policy.Policy implements it.
@@ -64,6 +74,10 @@ type Config struct {
 	URL         string
 	TrustDomain spiffeid.TrustDomain
 	Keys        KeySource
+	// CA is the certificate authority (SPEC section 2.5). Nil means the
+	// issuer has none: it publishes no X.509 authorities and issues no
+	// X.509-SVIDs.
+	CA CASource
 	// Policy decides who gets which identity. It is consulted on every
 	// request.
 	Policy PolicySource
@@ -80,6 +94,9 @@ type Config struct {
 	TrustedProxies []netip.Prefix
 	// TokenTTL is the lifetime of issued JWT-SVIDs, at most an hour.
 	TokenTTL time.Duration
+	// X509SVIDTTL is the lifetime of issued X.509-SVIDs, between ten minutes
+	// and a day.
+	X509SVIDTTL time.Duration
 	// ActivationDelay is how long a new key is published before it signs.
 	ActivationDelay time.Duration
 	// RefreshHint is the spiffe_refresh_hint published in the bundle, in
@@ -98,7 +115,10 @@ type Issuer struct {
 	replay   *replayCache
 	// These keep requests anyone can send from flooding the log, each on its
 	// own so that a flood of rejections cannot hide server errors.
-	rejectLog, errorLog logLimiter
+	rejectLog, errorLog, warnLog logLimiter
+	// noCommonName holds the origins already warned about for an
+	// X.509-SVID without a common name.
+	noCommonName sync.Map
 }
 
 // New validates cfg, fills in defaults and returns an Issuer.
@@ -131,6 +151,12 @@ func New(cfg Config) (*Issuer, error) {
 	}
 	if cfg.TokenTTL < settings.MinTokenTTL || cfg.TokenTTL > settings.MaxTokenTTL {
 		return nil, fmt.Errorf("token TTL %s is out of range (%s to %s)", cfg.TokenTTL, settings.MinTokenTTL, settings.MaxTokenTTL)
+	}
+	if cfg.X509SVIDTTL == 0 {
+		cfg.X509SVIDTTL = DefaultX509SVIDTTL
+	}
+	if cfg.X509SVIDTTL < settings.MinX509SVIDTTL || cfg.X509SVIDTTL > settings.MaxX509SVIDTTL {
+		return nil, fmt.Errorf("X.509-SVID TTL %s is out of range (%s to %s)", cfg.X509SVIDTTL, settings.MinX509SVIDTTL, settings.MaxX509SVIDTTL)
 	}
 	if cfg.ActivationDelay == 0 {
 		cfg.ActivationDelay = DefaultActivationDelay
@@ -256,6 +282,9 @@ func (iss *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	if iss.cfg.Management != nil {
 		doc["spiffex_management_endpoint"] = iss.ManagementEndpoint()
 	}
+	if iss.x509Usable() {
+		doc["spiffex_x509_svid_supported"] = true
+	}
 	writeJSON(w, http.StatusOK, doc, iss.publicCache())
 }
 
@@ -281,6 +310,16 @@ func (iss *Issuer) handleBundle(w http.ResponseWriter, _ *http.Request) {
 	writeBody(w, http.StatusOK, body, iss.publicCache())
 }
 
+// x509Usable reports whether the issuer has a certificate authority that can
+// sign an X.509-SVID now (SPEC section 2.1).
+func (iss *Issuer) x509Usable() bool {
+	if iss.cfg.CA == nil {
+		return false
+	}
+	set, _, _ := iss.cfg.CA.Current()
+	return set.Usable(iss.cfg.Now(), iss.cfg.X509SVIDTTL)
+}
+
 // Bundle returns the trust domain's SPIFFE bundle document.
 func (iss *Issuer) Bundle() ([]byte, error) {
 	set, seq, _ := iss.cfg.Keys.Current()
@@ -290,16 +329,45 @@ func (iss *Issuer) Bundle() ([]byte, error) {
 			return nil, err
 		}
 	}
+	if iss.cfg.CA != nil {
+		cas, caSeq, _ := iss.cfg.CA.Current()
+		for _, a := range cas.Anchors() {
+			b.AddX509Authority(a.Cert)
+		}
+		// Each sequence only grows, and grows when its own set changes, so
+		// their sum grows when either does.
+		seq += caSeq
+	}
 	b.SetSequenceNumber(seq)
 	b.SetRefreshHint(iss.cfg.RefreshHint)
-	return b.Marshal()
+	body, err := b.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	// With every key and CA file gone the list is empty, and go-spiffe writes
+	// it as null; a consumer must be able to tell "nothing" from a bad document.
+	return bytes.Replace(body, []byte(`"keys":null`), []byte(`"keys":[]`), 1), nil
 }
 
-// Mint signs a JWT-SVID for id with the given audiences. A token for the
-// management endpoint lives at most five minutes.
+// errNoJWTKeys is the answer to a request for a JWT-SVID when the keys
+// directory holds no key at all, as it is for an X.509-SVID when no CA
+// is left: the issuer is configured to issue no such SVID right now, and
+// retrying does not help until an operator adds a key.
+var errNoJWTKeys = errInvalidRequest("this issuer issues no JWT-SVIDs")
+
+// hasJWTKeys reports whether the issuer has any JWT signing key, exposed or
+// not. With keys that all are exposed the issuer is broken and answers
+// server_error, as it does for a CA that cannot sign.
+func (iss *Issuer) hasJWTKeys() bool {
+	set, _, _ := iss.cfg.Keys.Current()
+	return !set.Empty()
+}
+
 // errNoSigningKey means every signing key is exposed, so none may sign.
 var errNoSigningKey = errors.New("no signing key may sign")
 
+// Mint signs a JWT-SVID for id with the given audiences. A token for the
+// management endpoint lives at most five minutes.
 func (iss *Issuer) Mint(id spiffeid.ID, audiences []string) (token string, expires time.Time, err error) {
 	if !id.MemberOf(iss.cfg.TrustDomain) {
 		return "", time.Time{}, fmt.Errorf("%s is not in trust domain %s", id, iss.cfg.TrustDomain)
@@ -314,6 +382,9 @@ func (iss *Issuer) Mint(id spiffeid.ID, audiences []string) (token string, expir
 	}
 	now := iss.cfg.Now().Truncate(time.Second)
 	set, _, _ := iss.cfg.Keys.Current()
+	if set.Empty() {
+		return "", time.Time{}, errNoJWTKeys
+	}
 	key, ok := set.Active(now, iss.cfg.ActivationDelay)
 	if !ok {
 		iss.cfg.Logger.Error("no signing key may sign: every key is exposed; add a new key that only the issuer can read")
@@ -375,8 +446,15 @@ func (iss *Issuer) checkAudiences(audiences []string) ([]string, error) {
 	return out, nil
 }
 
+// algorithms lists the signing algorithms of the published keys. With none
+// published it lists the ones the issuer can sign with, because relying
+// parties read the list once and keep it, and the JWKS already says there is
+// no key.
 func algorithms(set *keyset.Set) []string {
-	var algs []string
+	if set.Empty() {
+		return []string{string(keyset.ES256), string(keyset.RS256)}
+	}
+	algs := []string{}
 	for _, k := range set.Keys() {
 		if !slices.Contains(algs, string(k.Algorithm)) {
 			algs = append(algs, string(k.Algorithm))

@@ -1,5 +1,6 @@
 {{- $tls := include "spiffex.tlsEnabled" . }}
 {{- $scheme := ternary "HTTPS" "HTTP" (eq $tls "true") }}
+{{- $caRoots := include "spiffex.caRoots" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -82,6 +83,16 @@ spec:
             - name: keys
               mountPath: /keys
               readOnly: true
+            {{- if .Values.ca.existingSecret }}
+            - name: ca
+              mountPath: /ca
+              readOnly: true
+            {{- end }}
+            {{- if $caRoots }}
+            - name: ca-roots
+              mountPath: /ca-roots
+              readOnly: true
+            {{- end }}
             {{- if $tls }}
             - name: tls
               mountPath: /tls
@@ -98,6 +109,29 @@ spec:
           secret:
             secretName: {{ required "signingKeys.existingSecret is required: create it from the files of spiffex key add" .Values.signingKeys.existingSecret | quote }}
             defaultMode: 0440
+        {{- if .Values.ca.existingSecret }}
+        - name: ca
+          secret:
+            secretName: {{ .Values.ca.existingSecret | quote }}
+            defaultMode: 0440
+        {{- end }}
+        {{- if $caRoots }}
+        - name: ca-roots
+          {{- if .Values.ca.roots.secret }}
+          secret:
+            secretName: {{ .Values.ca.roots.secret | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.ca.roots.key | quote }}
+                path: {{ .Values.ca.roots.key | quote }}
+          {{- else }}
+          configMap:
+            name: {{ .Values.ca.roots.configMap | quote }}
+            items:
+              - key: {{ .Values.ca.roots.key | quote }}
+                path: {{ .Values.ca.roots.key | quote }}
+          {{- end }}
+        {{- end }}
         {{- if $tls }}
         - name: tls
           secret:

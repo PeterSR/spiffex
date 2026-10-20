@@ -33,6 +33,13 @@
     "match": { "$ref": "#/$defs/conditions" },
     "deny": { "$ref": "#/$defs/conditions" },
     "audiences": { "$ref": "#/$defs/patterns" },
+    "svid_types": {
+      "description": "The kinds of SVID the origin's identities may obtain. Absent: [jwt] when an audience restriction is in effect, else the provider's value, else [jwt, x509] (SPEC section 4.5).",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["jwt", "x509"] }
+    },
     "members": {
       "type": "object",
       "propertyNames": { "pattern": "^(?:[A-Za-z0-9_-][A-Za-z0-9._-]{0,254}|\\.[A-Za-z0-9_-][A-Za-z0-9._-]{0,253}|\\.\\.[A-Za-z0-9._-]{1,253})$" },
