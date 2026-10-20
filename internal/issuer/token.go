@@ -117,6 +117,8 @@ type grant struct {
 	audiences []string
 	// x509Key is the CSR's public key when an X.509-SVID was requested.
 	x509Key crypto.PublicKey
+	// commonName is the common name of the X.509-SVID, empty for none.
+	commonName string
 	// ca is the certificate authority this request was judged against.
 	ca *ca.Set
 }
@@ -220,6 +222,15 @@ func (iss *Issuer) authorizeTokenRequest(r *http.Request) (*grant, error) {
 		if err != nil {
 			iss.logRejection("rejected a csr", "origin", g.origin.Name, "reason", err)
 			return nil, err
+		}
+		g.commonName, err = g.origin.CommonName(g.id.String(), g.id.Path())
+		if err != nil {
+			// The origin's template cannot name this identity. The caller is
+			// authenticated, so this may say why.
+			if iss.warnLog.allow(iss.cfg.Now()) {
+				iss.cfg.Logger.Warn("an origin's x509.cn cannot name an identity; no X.509-SVID issued", "origin", g.origin.Name, "spiffe_id", g.id, "error", err)
+			}
+			return nil, errInvalidRequest("the origin cannot name this identity in the subject of an X.509-SVID")
 		}
 		return g, nil
 	}

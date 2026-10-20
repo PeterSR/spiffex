@@ -1,6 +1,10 @@
 package state
 
-import "path/filepath"
+import (
+	"path/filepath"
+
+	"github.com/PeterSR/spiffex/internal/nametemplate"
+)
 
 // checkProvider checks what can be known of a provider from its own text,
 // before any origin fills in its parameters. It reports whether the
@@ -23,6 +27,11 @@ func (v *validator) checkProvider(path string, p *Provider) bool {
 	if _, isRef := paramRef(p.Name); !isRef {
 		if _, err := ParseTemplate(p.Name, kind); err != nil {
 			v.add(field(path, "name"), "%v", err)
+		}
+	}
+	if p.X509.cn() != nil {
+		if _, err := nametemplate.ParseCN(*p.X509.cn()); err != nil {
+			v.add(field(field(path, "x509"), "cn"), "%v", err)
 		}
 	}
 	for i, r := range p.Require {

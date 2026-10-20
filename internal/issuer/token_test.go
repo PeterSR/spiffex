@@ -150,6 +150,28 @@ origins:
     svid_types: [jwt, x509]
     members:
       narrowx: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
+  cnpath:
+    provider: keys
+    x509: { cn: "{path}" }
+    members:
+      m: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
+  cnhash:
+    provider: keys
+    x509: { cn: "h-{path|hash:24}" }
+    members:
+      m: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
+  cntrim:
+    provider: keys
+    x509: { cn: "T:{path|trim_prefix:/cntrim/}" }
+    members:
+      m: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
+      ` + strings.Repeat("n", 70) + `: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
+  cnbad:
+    provider: keys
+    x509: { cn: "B:{path|trim_prefix:/cnbad/|trim_suffix:-x}" }
+    members:
+      m: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
+      m-x: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
   kube-x509:
     provider: cluster
     svid_types: [x509]

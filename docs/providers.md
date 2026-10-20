@@ -182,6 +182,8 @@ The provider gives the origin its proof, its name template (`name`) and its admi
 | `require`, `match`, `deny` | more admission rules; they apply on top of the provider's, so an origin can narrow its provider but never widen it |
 | `audiences` | patterns of the audiences its identities may request, in place of the provider's default |
 | `svid_types` | the kinds of SVID its identities may obtain, a non-empty list of `jwt` and `x509` (SPEC section 4.5), in place of the provider's default; when absent, `[jwt]` for an origin with an audience restriction (the provider's default does not apply to it), otherwise the provider's default or `[jwt, x509]`. A request for a kind the list lacks is refused with `invalid_target`, and the agent passes that on as `PermissionDenied` |
+| `x509.cn` | the common name template of its X.509-SVIDs (SPEC section 4.6), in place of the provider's default; when absent, the SPIFFE ID, or no common name above 64 characters. [docs/x509.md](x509.md#choosing-the-common-name) says how to use it |
+| `jwt` | an object that takes no keys yet (`jwt: {}`); it reserves the place for settings of JWT-SVIDs |
 | `members` | for a `keys` provider, the members |
 
 A **claim path** names a claim: `sub`, or `kubernetes.io/namespace` for the `namespace` member of
@@ -266,7 +268,7 @@ A provider has these fields:
 | `description` | text for humans |
 | `params` | the parameters an origin fills in: each with `type: string` or `type: list`, and either `required: true` or a `default` |
 | `proof` | exactly one of `jwt`, `keys: {}` or `exec` |
-| `require`, `match`, `deny`, `name`, `audiences`, `svid_types` | as for an origin, above |
+| `require`, `match`, `deny`, `name`, `audiences`, `svid_types`, `x509.cn` | as for an origin, above; a provider's `x509.cn` is a literal template, without parameters |
 | `overrides` | `true` when it takes the place of a shipped provider of the same name |
 
 The `jwt` proof:

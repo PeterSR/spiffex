@@ -65,6 +65,7 @@ func (s *Server) check(w http.ResponseWriter, r *http.Request, c caller, b *base
 		Problems:             toProblems(report.Problems),
 		Overrides:            report.Overrides,
 		X509UnderRestriction: report.X509UnderRestriction(),
+		X509CNUnused:         report.X509CNUnused(),
 	})
 }
 

@@ -375,6 +375,30 @@ func TestCheckReportsX509UnderRestriction(t *testing.T) {
 	}
 }
 
+// An x509.cn on an origin without x509 is reported, and the field is absent
+// otherwise (SPEC section 4.6).
+func TestCheckReportsX509CNUnused(t *testing.T) {
+	h := newHarness(t, fileStore(t), people)
+	check := func(origin map[string]any) CheckResult {
+		a := h.as("/people/alice", http.MethodPost, "/check", map[string]any{"origins": map[string]any{"web": origin}})
+		wantStatus(t, a, http.StatusOK)
+		var result CheckResult
+		if err := json.Unmarshal(a.body, &result); err != nil {
+			t.Fatal(err)
+		}
+		if !result.Valid {
+			t.Fatalf("problems %v", result.Problems)
+		}
+		return result
+	}
+	if got := check(map[string]any{"provider": "keys", "x509": map[string]any{"cn": "{path}"}, "svid_types": []string{"jwt"}}).X509CNUnused; len(got) != 1 || got[0] != "web" {
+		t.Errorf("x509_cn_unused = %v, want [web]", got)
+	}
+	if got := check(map[string]any{"provider": "keys", "x509": map[string]any{"cn": "{path}"}}).X509CNUnused; len(got) != 0 {
+		t.Errorf("x509_cn_unused = %v, want none", got)
+	}
+}
+
 func wrapHandler(next http.Handler, path string, hit func()) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == path {

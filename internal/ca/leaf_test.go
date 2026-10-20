@@ -340,3 +340,40 @@ func TestSelectNotAfterIsWholeSeconds(t *testing.T) {
 		t.Errorf("not after %s, %v", choice.NotAfter, err)
 	}
 }
+
+// The caller chooses the common name; it is never cut, and none is allowed.
+func TestIssueLeafCN(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().Truncate(time.Second)
+	made, err := Init(dir, td, now.Add(-48*time.Hour), 5*365*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	touch(t, dir, now.Add(-48*time.Hour), made.File, made.KeyFile)
+	opts := testOptions(dir)
+	opts.TrustDomain = td
+	set, err := Load(opts, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice, err := set.Select(now, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := spiffeid.RequireFromPath(td, "/x/y")
+	for _, cn := range []string{"/x/y", "x/y", strings.Repeat("a", MaxNameLength), ""} {
+		leaf, err := IssueLeafCN(choice, id, cn, key(t).Public(), now)
+		if err != nil {
+			t.Fatalf("%q: %v", cn, err)
+		}
+		if leaf.Subject.CommonName != cn {
+			t.Errorf("CN %q, want %q", leaf.Subject.CommonName, cn)
+		}
+		if len(leaf.Subject.Organization) != 1 || len(leaf.URIs) != 1 || leaf.URIs[0].String() != id.String() {
+			t.Errorf("subject %v, URIs %v", leaf.Subject, leaf.URIs)
+		}
+	}
+	if _, err := IssueLeafCN(choice, id, strings.Repeat("a", MaxNameLength+1), key(t).Public(), now); err == nil {
+		t.Error("a common name of 65 characters was accepted")
+	}
+}

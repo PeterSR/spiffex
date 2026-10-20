@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+
+	"github.com/PeterSR/spiffex/internal/nametemplate"
 )
 
 // Kind is the kind of proof an origin takes.
@@ -54,6 +56,16 @@ type Expanded struct {
 	// SVIDTypes are the kinds of SVID the origin's identities may obtain
 	// (SPEC section 4.5), never empty.
 	SVIDTypes []string
+	// X509CN is the common name template of the origin's X.509-SVIDs (SPEC
+	// section 4.6). Nil means the default: the SPIFFE ID, left out when it
+	// exceeds 64 characters.
+	X509CN *nametemplate.CN
+	// X509CNOwn is set when the origin itself says x509.cn, rather than
+	// taking the provider's default.
+	X509CNOwn bool
+	// cn describes the common names the origin can issue, for the check
+	// across origins. Nil when it issues none.
+	cn *cnForm
 	// JWT is set for a jwt origin.
 	JWT *ExpandedJWT
 	// Exec is set for an exec origin.
@@ -254,6 +266,7 @@ func (x *expansion) expand(o *Origin, p *Provider) *Expanded {
 	}
 
 	e.SVIDTypes = EffectiveSVIDTypes(o.SVIDTypes, p.SVIDTypes, e.Audiences != nil)
+	x.expandCN(e, o, p, len(tmpl) == 0)
 
 	if kind != KindKeys && len(o.Members) > 0 {
 		x.originProblem(field(x.path, "members"), "only a keys origin has members, and this is a %s origin", kind)

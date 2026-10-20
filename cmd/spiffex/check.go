@@ -153,6 +153,9 @@ func printReports(w io.Writer, reports []namedReport) error {
 		for _, name := range nr.report.X509UnderRestriction() {
 			fmt.Fprintf(w, "%swarning: origin %s lists x509 and has an audience restriction, which does not cover its X.509-SVIDs\n", prefix, name)
 		}
+		for _, name := range nr.report.X509CNUnused() {
+			fmt.Fprintf(w, "%swarning: origin %s sets x509.cn but does not list x509 in svid_types, so it never applies\n", prefix, name)
+		}
 		if len(nr.report.Skipped) > 0 {
 			fmt.Fprintf(w, "%sskipped: %s\n", prefix, strings.Join(nr.report.Skipped, "; "))
 		}

@@ -51,6 +51,9 @@ type CheckResult struct {
 	// restriction and list x509 in svid_types, whose X.509-SVIDs escape
 	// the restriction (SPEC section 4.5).
 	X509UnderRestriction []string `json:"x509_under_restriction,omitempty"`
+	// X509CNUnused names the origins that set x509.cn but do not list x509
+	// in svid_types, so that it never applies (SPEC section 4.6).
+	X509CNUnused []string `json:"x509_cn_unused,omitempty"`
 }
 
 func toProblems(ps state.Problems) []Problem {
