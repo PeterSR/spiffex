@@ -106,9 +106,9 @@ from the environment.
 
 ## The certificate authority
 
-With `ca_dir` set, the issuer has a **certificate authority** (SPEC section 2.5) that signs
-X.509-SVIDs, and publishes its trust anchors in the bundle as X.509 authorities. Without it nothing
-about the issuer changes. `ca_dir` must be a directory of its own, neither `keys_dir` nor inside it or
+With `ca_dir` set, the issuer has a **certificate authority** (SPEC section 2.5; the
+[X.509-SVIDs guide](x509.md) is the overview) that signs X.509-SVIDs, and publishes its trust
+anchors in the bundle as X.509 authorities. Without it nothing about the issuer changes. `ca_dir` must be a directory of its own, neither `keys_dir` nor inside it or
 containing it, so that a mistake in one mount or Secret does not expose both kinds of key. The
 discovery document says `spiffex_x509_svid_supported: true` while the issuer has a CA that can sign.
 
@@ -162,12 +162,14 @@ no other CA. The issuer refuses to start with a root that is neither.
 **Rotation** follows the rules of the signing keys. A new CA is published, as a root through the
 bundle or through the root it chains to, for `activation_delay` before the issuer signs with anything
 that chains to it; a new intermediate under a root that has been published that long signs as soon as
-it appears. The issuer signs with the newest CA that may sign, and keeps an old root published until
+it appears. When no other CA with a key can sign, as in a new trust domain or after the only CA key
+was removed, a new CA signs at once, and verifiers reject what it signs until they fetch the new
+bundle. The issuer signs with the newest CA that may sign, and keeps an old root published until
 `x509_svid_ttl` plus ten minutes after the last time it could have signed with it. The delay counts
 from when the issuer first sees a certificate, whatever its file name or modification time says. To
-replace a root: add the new root to `ca_roots`, or run `spiffex ca init`, wait for `activation_delay`,
-install the CA that chains to it, wait out the retention, then `spiffex ca prune` and remove the old
-root from `ca_roots` (`ca prune` reminds you).
+replace a root: run `spiffex ca init` and wait for `activation_delay` (it then signs), or add the new
+root to `ca_roots`, wait, and install an intermediate under it; then wait out the retention, run
+`spiffex ca prune`, and remove the old root from `ca_roots` (`ca prune` reminds you).
 
 The issuer keeps no state across a restart, and learns when it first saw a certificate from its
 own run. Two cases follow. After adding a root to `ca_roots`, wait `activation_delay` before
@@ -429,8 +431,9 @@ directory only its user can enter, or a volume shared only between its container
 
 When the issuer has a certificate authority (its discovery document says
 `spiffex_x509_svid_supported: true`), the agent serves the X.509-SVID profile next to the JWT-SVID
-one: go-spiffe's `workloadapi.NewX509Source` with `tlsconfig.MTLSServerConfig` and `MTLSClientConfig` is tested against
-it; other libraries are expected to work, as the agent follows the standard, but are not tested yet.
+one. go-spiffe's `workloadapi.NewX509Source` with `tlsconfig.MTLSServerConfig` and `MTLSClientConfig`,
+and py-spiffe's `X509Source`, are tested against it; other libraries are expected to work, as the
+agent follows the standard, but are not tested ([the guide](x509.md#what-is-tested) says what is).
 The agent rereads that flag at every bundle refresh, so a CA added to a running issuer is noticed
 within the refresh hint.
 
@@ -498,8 +501,8 @@ that finds none only logs a warning, so an editor that renames the file away and
 the response takes up to two `-reload-interval`s), the running issuer stops signing
 JWT-SVIDs, as it stops signing X.509-SVIDs when the key of the last CA is removed. It logs an error
 and keeps running; the token endpoint answers a request for a JWT-SVID with `invalid_request` ("this
-issuer issues no JWT-SVIDs"), the JWKS and the bundle publish no JWT key, discovery lists no signing
-algorithm (it lists the ones it can sign with, ES256 and RS256), and X.509-SVIDs are unaffected. The management API admits nobody meanwhile, since it
+issuer issues no JWT-SVIDs"), the JWKS and the bundle publish no JWT key, discovery goes on listing the
+algorithms it can sign with, ES256 and RS256, and X.509-SVIDs are unaffected. The management API admits nobody meanwhile, since it
 can no longer mint or verify a management token; edit the stored state through its files if you
 must. Run `key add` to make a new key: it signs at once, as in a new trust domain, and the issuer
 picks it up within `-reload-interval`.

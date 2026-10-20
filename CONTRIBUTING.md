@@ -13,7 +13,7 @@ specification. Contributions that keep it that way are the most welcome kind.
 | `providers/` | the providers spiffex ships with, as plain provider documents |
 | `schema/` | the JSON Schemas of the state document, a provider and an origin |
 | `conformance/` | the interoperability matrix against stock SPIFFE and OIDC libraries |
-| `docs/` | configuration, providers and verifiers, Kubernetes, the management API |
+| `docs/` | configuration, providers and verifiers, Kubernetes, the management API, X.509-SVIDs |
 | `examples/` | complete settings files and states; a test validates them and the examples in `docs/` |
 | `deploy/kubernetes/` | example manifests for the issuer and a workload |
 | `charts/spiffex/` | the Helm chart for the issuer; `ci/` holds the value sets its tests render |

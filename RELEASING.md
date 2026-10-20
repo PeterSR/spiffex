@@ -40,7 +40,8 @@ defaults to `v` and its `appVersion`, so a chart always installs the image of it
 
 ## Cutting a release
 
-1. Make sure `main` is green.
+1. Make sure `main` is green, and run the end-to-end tests on kind, which CI does not
+   (`test/e2e/kind.sh`, `kind-helm.sh` and `kind-x509.sh`; CONTRIBUTING.md says how).
 2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add a new empty
    `## [Unreleased]` above it, and update the links at the bottom. The release fails when the
    version has no section, or an empty one; check with `scripts/changelog-section.sh vX.Y.Z`.

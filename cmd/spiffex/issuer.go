@@ -29,7 +29,7 @@ func runIssuer(ctx context.Context, args []string) error {
 	listen := fs.String("listen", ":8443", "address to listen on")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file, reloaded when it changes; without one the issuer serves plain HTTP, for use behind a TLS-terminating proxy")
 	tlsKey := fs.String("tls-key", "", "TLS private key file")
-	reload := fs.Duration("reload-interval", 10*time.Second, "how often to check the state and the keys directory for changes")
+	reload := fs.Duration("reload-interval", 10*time.Second, "how often to check the state, the keys directory, the CA directory and the CA roots file for changes")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
 	if err := parseFlags(fs, args); err != nil {
 		return err

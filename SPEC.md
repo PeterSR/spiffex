@@ -227,8 +227,10 @@ certificate:
    the clock skew allowance. An anchor past its own `notAfter` MAY be dropped.
 
 As in section 2.4, the delay is measured from when the issuer first publishes the anchor, and when
-no anchor has completed it, as in a newly created trust domain, the issuer signs with the signing CA
-it would have used had it been running all along, or else with the oldest. The exception is an
+no signing CA that has a key can sign by these rules, as in a newly created trust domain or after the
+only CA key was removed, the issuer signs with the signing CA it would have used had it been running
+all along, or else with the oldest, even inside the delay of its anchor. Verifiers that have not yet
+fetched that anchor reject what it signs until they do. The exception is an
 anchor the issuer, while running, published again after it had left the bundle: no CA under it signs
 until the delay has passed, even if that leaves no CA able to sign.
 
