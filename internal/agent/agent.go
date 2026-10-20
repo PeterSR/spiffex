@@ -1,9 +1,10 @@
-// Package agent implements the spiffex agent: the JWT half of the SPIFFE
-// Workload API, served on a Unix socket for one workload, backed by a spiffex
-// issuer.
+// Package agent implements the spiffex agent: the SPIFFE Workload API, JWT
+// and X.509 profiles, served on a Unix socket for one workload, backed by a
+// spiffex issuer.
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/spiffe/go-spiffe/v2/bundle/jwtbundle"
 	"github.com/spiffe/go-spiffe/v2/bundle/spiffebundle"
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/proto/spiffe/workload"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
@@ -72,9 +74,16 @@ type Agent struct {
 	fetchSlots chan struct{}
 	id         spiffeid.ID // the workload's identity, once known
 
-	bundleMu      sync.RWMutex
-	bundle        *spiffebundle.Bundle
+	// refreshMu serializes bundle refreshes, so a fetch that began earlier
+	// can never store its result over a later one's.
+	refreshMu sync.Mutex
+	bundleMu  sync.RWMutex
+	bundle    *spiffebundle.Bundle
+	// bundleChanged is closed, and replaced, when the bundle's authorities
+	// or the issuer's X.509 support change.
 	bundleChanged chan struct{}
+
+	x509 *x509Hub
 }
 
 // New returns an Agent. Call Run to start fetching the bundle and Serve to
@@ -89,7 +98,7 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Agent{
+	a := &Agent{
 		issuer:        cfg.Issuer,
 		cred:          cfg.Credential,
 		logger:        cfg.Logger,
@@ -97,7 +106,9 @@ func New(cfg Config) (*Agent, error) {
 		inflight:      make(map[string]*tokenCall),
 		fetchSlots:    make(chan struct{}, maxConcurrentFetches),
 		bundleChanged: make(chan struct{}),
-	}, nil
+	}
+	a.x509 = newX509Hub(a)
+	return a, nil
 }
 
 // Run keeps the trust bundle current until ctx is done: it fetches at once,
@@ -124,6 +135,8 @@ func (a *Agent) Run(ctx context.Context) {
 // refreshBundle fetches the bundle and returns how long to wait before the
 // next fetch, or zero if the fetch failed.
 func (a *Agent) refreshBundle(ctx context.Context) time.Duration {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
 	bundle, err := a.issuer.FetchBundle(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -131,12 +144,16 @@ func (a *Agent) refreshBundle(ctx context.Context) time.Duration {
 		}
 		return 0
 	}
+	supportChanged, err := a.issuer.refreshX509Support(ctx)
+	if err != nil && ctx.Err() == nil {
+		a.logger.Warn("rereading the issuer's discovery document failed", "error", err)
+	}
 	a.bundleMu.Lock()
-	if a.bundle == nil || !sameAuthorities(a.bundle, bundle) {
+	if supportChanged || a.bundle == nil || !sameAuthorities(a.bundle, bundle) {
 		a.bundle = bundle
 		close(a.bundleChanged)
 		a.bundleChanged = make(chan struct{})
-		a.logger.Info("trust bundle updated", "keys", len(bundle.JWTAuthorities()))
+		a.logger.Info("trust bundle updated", "keys", len(bundle.JWTAuthorities()), "x509_authorities", len(bundle.X509Authorities()), "x509_svids", a.issuer.X509Supported())
 	}
 	a.bundleMu.Unlock()
 
@@ -147,11 +164,18 @@ func (a *Agent) refreshBundle(ctx context.Context) time.Duration {
 	return max(hint, minRefresh)
 }
 
-// sameAuthorities compares only the keys. Sequence numbers and refresh hints
-// differ between issuer processes and are no reason to notify workloads.
+// sameAuthorities compares only the keys and certificates. Sequence numbers
+// and refresh hints differ between issuer processes and are no reason to
+// notify workloads.
 func sameAuthorities(a, b *spiffebundle.Bundle) bool {
 	return jwtbundle.FromJWTAuthorities(a.TrustDomain(), a.JWTAuthorities()).
-		Equal(jwtbundle.FromJWTAuthorities(b.TrustDomain(), b.JWTAuthorities()))
+		Equal(jwtbundle.FromJWTAuthorities(b.TrustDomain(), b.JWTAuthorities())) &&
+		sameX509Authorities(a, b)
+}
+
+func sameX509Authorities(a, b *spiffebundle.Bundle) bool {
+	return x509bundle.FromX509Authorities(a.TrustDomain(), a.X509Authorities()).
+		Equal(x509bundle.FromX509Authorities(b.TrustDomain(), b.X509Authorities()))
 }
 
 func (a *Agent) currentBundle() (*spiffebundle.Bundle, <-chan struct{}) {
@@ -461,16 +485,21 @@ func (a *Agent) FetchJWTBundles(_ *workload.JWTBundlesRequest, stream workload.S
 			bundle, changed = a.currentBundle()
 		}
 	}
+	var sent []byte
 	for {
 		jwks, err := marshalJWTBundle(bundle)
 		if err != nil {
 			return status.Error(codes.Internal, "encoding the bundle failed")
 		}
-		resp := &workload.JWTBundlesResponse{
-			Bundles: map[string][]byte{bundle.TrustDomain().IDString(): jwks},
-		}
-		if err := stream.Send(resp); err != nil {
-			return err
+		// X.509 authorities share the notification; they are no news here.
+		if !bytes.Equal(jwks, sent) {
+			resp := &workload.JWTBundlesResponse{
+				Bundles: map[string][]byte{bundle.TrustDomain().IDString(): jwks},
+			}
+			if err := stream.Send(resp); err != nil {
+				return err
+			}
+			sent = jwks
 		}
 		select {
 		case <-ctx.Done():

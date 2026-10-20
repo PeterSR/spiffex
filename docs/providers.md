@@ -181,7 +181,7 @@ The provider gives the origin its proof, its name template (`name`) and its admi
 | `name` | a name template in place of the provider's |
 | `require`, `match`, `deny` | more admission rules; they apply on top of the provider's, so an origin can narrow its provider but never widen it |
 | `audiences` | patterns of the audiences its identities may request, in place of the provider's default |
-| `svid_types` | the kinds of SVID its identities may obtain, a non-empty list of `jwt` and `x509` (SPEC section 4.5), in place of the provider's default; when absent, `[jwt]` for an origin with an audience restriction (the provider's default does not apply to it), otherwise the provider's default or `[jwt, x509]`. Only `jwt` is enforced so far, since no X.509-SVIDs are issued yet |
+| `svid_types` | the kinds of SVID its identities may obtain, a non-empty list of `jwt` and `x509` (SPEC section 4.5), in place of the provider's default; when absent, `[jwt]` for an origin with an audience restriction (the provider's default does not apply to it), otherwise the provider's default or `[jwt, x509]`. A request for a kind the list lacks is refused with `invalid_target`, and the agent passes that on as `PermissionDenied` |
 | `members` | for a `keys` provider, the members |
 
 A **claim path** names a claim: `sub`, or `kubernetes.io/namespace` for the `namespace` member of

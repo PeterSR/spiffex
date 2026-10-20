@@ -153,7 +153,7 @@ kubectl -n shop exec deploy/billing -c spiffex-agent -- /spiffex token \
 | [SPIFFE-ID](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE-ID.md) | issued and validated |
 | [JWT-SVID](https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md) | issued and validated |
 | [Trust bundles](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Trust_Domain_and_Bundle.md) | served as an `https_web` bundle endpoint |
-| [Workload API](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md) | the JWT-SVID profile only. The X.509-SVID profile is specified (SPEC sections 2.5, 3.4 and 9) but not implemented yet, so the agent is not a complete Workload API server; use your library's JWT source. |
+| [Workload API](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md) | the JWT-SVID and X.509-SVID profiles, for an issuer with a certificate authority (`ca_dir`): `FetchX509SVID` streams a certificate with a fresh in-memory key, renewed at 40 to 50 percent of its life, and `FetchX509Bundles` streams the roots. Against an issuer without one the X.509 calls answer `Unimplemented` and the JWT profile is all there is. |
 
 ## Status
 

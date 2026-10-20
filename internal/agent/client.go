@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -42,6 +43,9 @@ type IssuerClient struct {
 	tokenEndpoint  string
 	bundleEndpoint string
 	trustDomain    spiffeid.TrustDomain
+	// x509Supported is the discovery document's spiffex_x509_svid_supported,
+	// read again at each bundle refresh.
+	x509Supported atomic.Bool
 }
 
 // RejectedError is returned when the issuer refused a token request, as
@@ -93,12 +97,7 @@ func Discover(ctx context.Context, issuerURL string, trustDomain spiffeid.TrustD
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
-	var doc struct {
-		Issuer         string `json:"issuer"`
-		TokenEndpoint  string `json:"token_endpoint"`
-		BundleEndpoint string `json:"spiffe_bundle_endpoint"`
-		TrustDomain    string `json:"spiffe_trust_domain"`
-	}
+	var doc discoveryDocument
 	if err := getJSON(ctx, &client, issuerURL+"/.well-known/openid-configuration", &doc); err != nil {
 		return nil, fmt.Errorf("discovery: %w", err)
 	}
@@ -117,13 +116,46 @@ func Discover(ctx context.Context, issuerURL string, trustDomain spiffeid.TrustD
 	if !trustDomain.IsZero() && trustDomain != announced {
 		return nil, configErrorf("discovery: issuer serves trust domain %s, configured %s", announced, trustDomain)
 	}
-	return &IssuerClient{
+	c := &IssuerClient{
 		issuerURL:      issuerURL,
 		httpClient:     &client,
 		tokenEndpoint:  doc.TokenEndpoint,
 		bundleEndpoint: doc.BundleEndpoint,
 		trustDomain:    announced,
-	}, nil
+	}
+	c.x509Supported.Store(doc.X509SVIDSupported)
+	return c, nil
+}
+
+// discoveryDocument is the part of the issuer's discovery document the agent
+// reads.
+type discoveryDocument struct {
+	Issuer            string `json:"issuer"`
+	TokenEndpoint     string `json:"token_endpoint"`
+	BundleEndpoint    string `json:"spiffe_bundle_endpoint"`
+	TrustDomain       string `json:"spiffe_trust_domain"`
+	X509SVIDSupported bool   `json:"spiffex_x509_svid_supported"`
+}
+
+// X509Supported reports whether the issuer announced X.509-SVIDs when it was
+// last asked.
+func (c *IssuerClient) X509Supported() bool { return c.x509Supported.Load() }
+
+// refreshX509Support asks discovery again whether the issuer issues
+// X.509-SVIDs, and reports whether the answer changed. A CA added to or
+// removed from a running issuer changes it; nothing else in the document is
+// reread.
+func (c *IssuerClient) refreshX509Support(ctx context.Context) (changed bool, err error) {
+	var doc discoveryDocument
+	if err := getJSON(ctx, c.httpClient, c.issuerURL+"/.well-known/openid-configuration", &doc); err != nil {
+		return false, fmt.Errorf("discovery: %w", err)
+	}
+	// A body that is not this issuer's document (a proxy's error page, a
+	// replica of something else) must not withdraw the support.
+	if doc.Issuer != c.issuerURL {
+		return false, fmt.Errorf("discovery: issuer %q does not match %q, keeping the previous answer", doc.Issuer, c.issuerURL)
+	}
+	return c.x509Supported.Swap(doc.X509SVIDSupported) != doc.X509SVIDSupported, nil
 }
 
 func checkIssuerURL(raw string) error {

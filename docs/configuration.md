@@ -423,9 +423,42 @@ Workloads find the agent through `SPIFFE_ENDPOINT_SOCKET=unix:///run/spiffex/bil
 who can connect to the socket gets the workload's identity, so keep it private to the workload: a
 directory only its user can enter, or a volume shared only between its containers.
 
-Use your SPIFFE library's JWT parts. The agent does not serve X.509-SVIDs yet (the specification
-describes them in sections 2.5, 3.4 and 9, but this release does not implement them), and the X.509
-and combined bundle sources of go-spiffe and py-spiffe wait for them until they time out.
+### X.509-SVIDs from the agent
+
+When the issuer has a certificate authority (its discovery document says
+`spiffex_x509_svid_supported: true`), the agent serves the X.509-SVID profile next to the JWT-SVID
+one: go-spiffe's `workloadapi.NewX509Source` with `tlsconfig.MTLSServerConfig` and `MTLSClientConfig` is tested against
+it; other libraries are expected to work, as the agent follows the standard, but are not tested yet.
+The agent rereads that flag at every bundle refresh, so a CA added to a running issuer is noticed
+within the refresh hint.
+
+- `FetchX509SVID` streams one certificate chain, its private key (PKCS#8 DER) and the trust domain's
+  X.509 bundle. The agent makes a new P-256 key for each certificate, asks the issuer for it with the
+  workload's own proof, and renews at a random point between 40 and 50 percent of the certificate's
+  life. Every open stream is sent each renewal, and every stream of the workload gets the same
+  certificate and key. It never sends a certificate with less than a tenth of its life left. A stream
+  that opens before the first certificate exists waits for it.
+- While the issuer is down the agent retries with waits that start at a second, double up to a minute
+  and are jittered, and keeps serving the certificate it has until the tenth is reached. Nothing is
+  asked of the issuer while no stream is open.
+- When the issuer refuses the request (`invalid_client`, `invalid_request`, `invalid_target`,
+  `unsupported_grant_type`), for instance because the origin's `svid_types` lacks `x509`, every open
+  stream ends with `PermissionDenied`, the certificate is dropped, and new streams get the same
+  answer for a minute without the issuer being asked again. The JWT calls are unaffected.
+- `FetchX509Bundles` streams the roots, and `FetchX509SVID` carries them too, again whenever a root
+  is published or retired.
+- Without a certificate authority at the issuer both calls answer `Unimplemented`, and go-spiffe's
+  X.509 and combined sources wait for it until their deadline: use the JWT parts of the library.
+
+Issuer replicas must share `ca_dir` and `keys_dir`. Replicas that disagree about the CA make the
+discovery flag and the bundle differ from one refresh to the next, and the agent sees X.509 support
+flap and its SVIDs stop chaining to the bundle.
+
+The private keys live in the agent's memory and in the responses on the socket. The agent writes no
+file for them and logs no key material. It does not lock the memory (a key can reach swap) and cannot
+zero it: Go gives no way to wipe a key out of the heap or out of gRPC's buffers, so use encrypted swap
+where that matters. The agent logs the serial number, SPIFFE ID and validity of each
+certificate it obtains.
 
 ## Rotating signing keys
 

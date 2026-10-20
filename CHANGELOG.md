@@ -34,6 +34,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `requested_token_type` are `invalid_request`, and each certificate is logged with its serial number.
 - `spiffex token -x509 -key-out FILE -cert-out FILE [-bundle-out FILE]` fetches an X.509-SVID for a
   new P-256 key made in memory, written with mode 0600 and never over an existing file.
+- The agent serves X.509-SVIDs over the Workload API when the issuer has a CA. `FetchX509SVID`
+  streams the workload's certificate chain, a PKCS#8 key made in memory for each certificate, and
+  the trust domain's X.509 bundle; the certificate is renewed at a random 40 to 50 percent of its
+  life and sent to every open stream, which all share one key, and it is never sent with under a tenth
+  of its life left. The agent retries with jittered exponential backoff while the issuer is down and
+  remembers an issuer's refusal for a minute (`PermissionDenied`, so a JWT-only origin keeps its
+  JWT-SVIDs). `FetchX509Bundles` streams the roots, and both streams follow a root being published or
+  retired. Against an issuer without a CA the X.509 calls answer `Unimplemented`; the agent rereads the
+  discovery flag at each bundle refresh. `FetchJWTBundles` no longer repeats an unchanged bundle when
+  only the X.509 roots changed.
 - `POST /manage/check` reports `x509_under_restriction`: the origins that list `x509` under an
   audience restriction, which does not cover their X.509-SVIDs.
 
