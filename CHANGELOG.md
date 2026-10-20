@@ -7,6 +7,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-20
+
 This release adds X.509-SVIDs: an issuer with a certificate authority hands out short-lived
 certificates next to JWT-SVIDs, and the agent serves a complete Workload API. An issuer without
 `ca_dir` still issues JWT-SVIDs only. [docs/x509.md](docs/x509.md) is the guide. Read "Changed"
@@ -238,7 +240,8 @@ The first version: an issuer, an agent and the `spiffex` command, following vers
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
 
-[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.2.0
 [0.1.3]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.3
 [0.1.3-rc.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.3-rc.1
 [0.1.2]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.2
