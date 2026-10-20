@@ -1105,7 +1105,7 @@ func TestX509CommonNameTemplate(t *testing.T) {
 
 	t.Run("path", func(t *testing.T) {
 		resp := request("cnpath/m")
-		if cn, orgs := subject(resp); cn != "/cnpath/m" || len(orgs) != 1 || orgs[0] != "example.org" {
+		if cn, orgs := subject(resp); cn != "cnpath/m" || len(orgs) != 1 || orgs[0] != "example.org" {
 			t.Errorf("CN %q, O %v", cn, orgs)
 		}
 		if resp.body["spiffe_id"] != "spiffe://example.org/cnpath/m" {

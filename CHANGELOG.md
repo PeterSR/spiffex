@@ -12,7 +12,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `x509.cn` on origins and providers chooses the common name of an origin's X.509-SVIDs: literal text
   around `{spiffe_id}` or `{path}`, which may be trimmed with `trim_prefix` and `trim_suffix` or
   replaced by a hash (SPEC section 4.6). A data store that maps the common name to a role, such as
-  PostgreSQL, no longer needs a SPIFFE ID of 64 characters or less: `x509: { cn: "{path}" }` drops the
+  PostgreSQL, no longer needs a SPIFFE ID of 64 characters or less: `x509: { cn: "{path|trim_prefix:/}" }` drops the
   trust domain, and `x509: { cn: "{path|hash:24}" }` gives a fixed-length name whatever the path. Without
   `x509.cn` the common name is as before. A template that cannot name an identity (a trim that does
   not apply, a name over 64 characters) fails the request with `invalid_request` and a log line,
@@ -20,12 +20,13 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   could issue the same common name, and warn about `x509.cn` on an origin without `x509`
   (`x509_cn_unused` in `POST /manage/check`).
 - The `hash:<n>` operation for name templates (SPEC section 4.1) and for common name templates:
-  the first n characters (16 to 52) of the lowercase base32 of the SHA-256 of the value. It makes any
-  claim value a valid segment. It is one-to-one up to collisions of at least 80 bits, where the trims
+  the first n characters (24 to 52) of the lowercase base32 of the SHA-256 of the value. It makes any
+  claim value a valid segment. It is one-to-one up to collisions of at least 120 bits, where the trims
   are one-to-one outright.
-
 - An optional `jwt: {}` object on origins and providers, which takes no keys yet and reserves the
   place for settings of JWT-SVIDs.
+- A common name never starts with `/`: PostgreSQL reads a `pg_ident.conf` system user that starts with
+  `/` as an unanchored regular expression. Templates that could produce one are refused.
 
 ### Compatibility
 

@@ -99,10 +99,19 @@ func TestCommonNameProblems(t *testing.T) {
 		{"not a template", `origins: { a: { provider: keys, x509: { cn: "fixed" } } }`, "origins.a.x509.cn", "needs a placeholder"},
 		{"a claim", `origins: { a: { provider: keys, x509: { cn: "{sub}" } } }`, "origins.a.x509.cn", "placeholder is"},
 		{"unknown operation", `origins: { a: { provider: keys, x509: { cn: "{path|lower:x}" } } }`, "origins.a.x509.cn", "unknown operation"},
-		{"bad hash length", `origins: { a: { provider: keys, x509: { cn: "{path|hash:8}" } } }`, "origins.a.x509.cn", "from 16 to 52"},
-		{"hash not last", `origins: { a: { provider: keys, x509: { cn: "{path|hash:16|trim_prefix:x}" } } }`, "origins.a.x509.cn", "last operation"},
+		{"bad hash length", `origins: { a: { provider: keys, x509: { cn: "{path|hash:8}" } } }`, "origins.a.x509.cn", "from 24 to 52"},
+		{"hash not last", `origins: { a: { provider: keys, x509: { cn: "{path|hash:24|trim_prefix:x}" } } }`, "origins.a.x509.cn", "last operation"},
 		{"trim that never applies", `origins: { a: { provider: keys, prefix: /tenants, x509: { cn: "{path|trim_prefix:/other/}" } } }`, "origins.a.x509.cn", "can never apply"},
 		{"trim of a whole path", `origins: { a: { provider: keys, name: "", prefix: /tenants, x509: { cn: "{path|trim_prefix:/tenants}" } } }`, "origins.a.x509.cn", "can never apply"},
+		// PostgreSQL reads a pg_ident system user that starts with / as a regex.
+		{"a bare path", `origins: { a: { provider: keys, x509: { cn: "{path}" } } }`, "origins.a.x509.cn", "can start with /"},
+		{"a path with a suffix trimmed", `origins: { a: { provider: keys, x509: { cn: "{path|trim_suffix:/x}" } } }`, "origins.a.x509.cn", "can start with /"},
+		{"a prefix trimmed short of the slash", `origins: { a: { provider: keys, prefix: /tenants, x509: { cn: "{path|trim_prefix:/tenants}" } } }`, "origins.a.x509.cn", "can start with /"},
+		{"a trim that reaches into the name", `origins: { a: { provider: keys, prefix: /tenants, x509: { cn: "{path|trim_prefix:/tenants/x}" } } }`, "origins.a.x509.cn", "can start with /"},
+		{"text that starts with /", `origins: { a: { provider: keys, x509: { cn: "/b{path}" } } }`, "origins.a.x509.cn", "must not start with /"},
+		{"a bare path in a provider's default", `
+providers: { p: { proof: { keys: {} }, name: "{member}", x509: { cn: "{path}" } } }
+origins: { a: { provider: p } }`, "providers.p.x509.cn", "can start with /"},
 		{"too long", `origins: { a: { provider: keys, prefix: ` + long + `, x509: { cn: "{spiffe_id}" } } }`, "origins.a.x509.cn", "at least"},
 		{"hash and text too long", `origins: { a: { provider: keys, x509: { cn: "` + strings.Repeat("a", 20) + `{path|hash:52}" } } }`, "origins.a.x509.cn", "at least 72"},
 		{"unknown key", `origins: { a: { provider: keys, x509: { common_name: "{path}" } } }`, "origins.a", "common_name"},
@@ -123,6 +132,13 @@ origins: { a: { provider: p } }`, "providers.p.x509.cn", "can never apply"},
 				return
 			}
 			r := Validate(st, testSettings())
+			if tt.name == "a bare path" {
+				// A hand-written pg_ident line for /tenants/x/backend would also
+				// match /zz/tenants/x/backend, were both names allowed.
+				if len(r.Origins) != 0 {
+					t.Error("the origin was accepted")
+				}
+			}
 			wantProblem(t, r, tt.path, tt.msg)
 		})
 	}
@@ -151,27 +167,27 @@ origins:
   ab: { provider: keys }`, false},
 		{"paths", `
 origins:
-  a: { provider: keys, x509: { cn: "{path}" } }
-  b: { provider: keys, x509: { cn: "{path}" } }
+  a: { provider: keys, x509: { cn: "a:{path}" } }
+  b: { provider: keys, x509: { cn: "b:{path}" } }
   c: { provider: keys }`, false},
 		{"own prefix trimmed next to defaults", `
 origins:
   tenants: { provider: keys, prefix: /tenants, x509: { cn: "{path|trim_prefix:/tenants/}" } }
   web: { provider: keys }
-  api: { provider: keys, x509: { cn: "{path}" } }`, false},
+  api: { provider: keys, x509: { cn: "api:{path}" } }`, false},
 		{"own prefix trimmed next to a hash", `
 origins:
   tenants: { provider: keys, prefix: /tenants, x509: { cn: "{path|trim_prefix:/tenants/}" } }
-  hashed: { provider: keys, x509: { cn: "{path|hash:20}" } }`, true},
+  hashed: { provider: keys, x509: { cn: "{path|hash:24}" } }`, true},
 		{"own prefix trimmed next to a hash with text", `
 origins:
   tenants: { provider: keys, prefix: /tenants, x509: { cn: "t:{path|trim_prefix:/tenants/}" } }
-  hashed: { provider: keys, x509: { cn: "{path|hash:20}" } }`, false},
+  hashed: { provider: keys, x509: { cn: "{path|hash:24}" } }`, false},
 		{"own prefix trimmed and suffix trimmed next to defaults", `
 origins:
   tenants: { provider: keys, prefix: /tenants, name: "{member}/backend", x509: { cn: "{path|trim_prefix:/tenants/|trim_suffix:/backend}" } }
   web: { provider: keys }
-  api: { provider: keys, x509: { cn: "{path}" } }`, false},
+  api: { provider: keys, x509: { cn: "api:{path}" } }`, false},
 		{"two trimmed prefixes", `
 origins:
   a: { provider: keys, x509: { cn: "{path|trim_prefix:/a/}" } }
@@ -186,12 +202,12 @@ origins:
   b: { provider: keys, x509: { cn: "pg:{path|trim_prefix:/b/}" } }`, true},
 		{"text that ends where the other's value starts", `
 origins:
-  b: { provider: keys, name: "", prefix: /b }
-  c: { provider: keys, x509: { cn: "/b{path}" } }`, false},
+  b: { provider: keys, name: "", x509: { cn: "{path|trim_prefix:/}" } }
+  c: { provider: keys, x509: { cn: "b{path}" } }`, false},
 		{"a prefix that spells another origin's path", `
 origins:
-  b: { provider: keys, x509: { cn: "{path}" } }
-  c: { provider: keys, x509: { cn: "/b{path}" } }`, true},
+  b: { provider: keys, x509: { cn: "{path|trim_prefix:/}" } }
+  c: { provider: keys, x509: { cn: "b{path}" } }`, true},
 		{"same hash", `
 origins:
   a: { provider: keys, x509: { cn: "{path|hash:24}" } }
@@ -214,8 +230,8 @@ origins:
   b: { provider: keys, x509: { cn: "{path|trim_prefix:/b/|hash:24}.b" } }`, false},
 		{"hash of trimmed values, text of different length", `
 origins:
-  a: { provider: keys, x509: { cn: "{path|trim_prefix:/a/|hash:24}" } }
-  b: { provider: keys, x509: { cn: "a{path|trim_prefix:/b/|hash:23}" } }`, true},
+  a: { provider: keys, x509: { cn: "{path|trim_prefix:/a/|hash:25}" } }
+  b: { provider: keys, x509: { cn: "a{path|trim_prefix:/b/|hash:24}" } }`, true},
 		{"hashes of different lengths with the same text", `
 origins:
   a: { provider: keys, x509: { cn: "{path|hash:24}" } }
@@ -223,7 +239,7 @@ origins:
 		{"hash next to a path", `
 origins:
   a: { provider: keys, x509: { cn: "{path|hash:24}" } }
-  b: { provider: keys, x509: { cn: "{path}" } }
+  b: { provider: keys, x509: { cn: "{path|trim_prefix:/}" } }
   c: { provider: keys, x509: { cn: "{spiffe_id}" } }
   d: { provider: keys }`, false},
 		{"an origin without x509 is not compared", `
@@ -234,18 +250,18 @@ origins:
 origins:
   a: { provider: keys, name: "" }
   ab: { provider: keys, name: "" }
-  a-b: { provider: keys, name: "", x509: { cn: "{path}" } }`, false},
+  a-b: { provider: keys, name: "", x509: { cn: "{path|trim_prefix:/}" } }`, false},
 		{"suffix trimmed", `
 origins:
-  a: { provider: keys, x509: { cn: "{path|trim_suffix:/x}" } }
-  b: { provider: keys, x509: { cn: "{path}" } }`, true},
+  a: { provider: keys, x509: { cn: "{path|trim_prefix:/a/|trim_suffix:/x}" } }
+  b: { provider: keys, x509: { cn: "{path|trim_prefix:/b/}" } }`, true},
 		{"suffix trimmed next to defaults", `
 origins:
-  a: { provider: keys, x509: { cn: "{path|trim_suffix:/x}" } }
+  a: { provider: keys, x509: { cn: "{path|trim_prefix:/a/|trim_suffix:/x}" } }
   b: { provider: keys }`, false},
 		{"suffix trimmed with text", `
 origins:
-  a: { provider: keys, x509: { cn: "a{path|trim_suffix:/x}" } }
+  a: { provider: keys, x509: { cn: "a:{path|trim_suffix:/x}" } }
   b: { provider: keys }`, false},
 	}
 	for _, tt := range tests {
@@ -286,10 +302,10 @@ func TestCommonNameSkippedForASingleObject(t *testing.T) {
 func TestX509CNUnused(t *testing.T) {
 	r := check(t, `
 providers:
-  p: { proof: { keys: {} }, x509: { cn: "{path}" }, svid_types: [jwt] }
+  p: { proof: { keys: {} }, x509: { cn: "p:{path}" }, svid_types: [jwt] }
 origins:
-  unused: { provider: keys, x509: { cn: "{path}" }, svid_types: [jwt] }
-  used: { provider: keys, x509: { cn: "{path}" } }
+  unused: { provider: keys, x509: { cn: "p:{path}" }, svid_types: [jwt] }
+  used: { provider: keys, x509: { cn: "u:{path}" } }
   by-default: { provider: p }
 `)
 	wantValid(t, r)
@@ -323,7 +339,7 @@ func TestCommonNameDisjointnessIsSound(t *testing.T) {
 			}
 		}
 		if rng.Intn(3) == 0 {
-			b.WriteString(fmt.Sprintf("|hash:%d", 16+rng.Intn(3)))
+			b.WriteString(fmt.Sprintf("|hash:%d", 24+rng.Intn(3)))
 		}
 		b.WriteString("}")
 		b.WriteString(tails[rng.Intn(len(tails))])
@@ -354,6 +370,11 @@ func TestCommonNameDisjointnessIsSound(t *testing.T) {
 			}
 			o.cn = cn
 			o.form, _ = formOf(cn, domain, o.prefix, o.emptyName)
+			if o.form.mayStartWithSlash() {
+				// Validation refuses it; and what it lets through never
+				// renders a name that starts with /.
+				continue
+			}
 			o.names = map[string]bool{}
 			ids := []string{o.prefix}
 			if !o.emptyName {
@@ -364,6 +385,9 @@ func TestCommonNameDisjointnessIsSound(t *testing.T) {
 			}
 			for _, path := range ids {
 				if out, err := cn.Render("spiffe://"+domain+path, path); err == nil {
+					if strings.HasPrefix(out, "/") {
+						t.Fatalf("%s on %s gives %q, which starts with /", o.tmpl, o.prefix, out)
+					}
 					o.names[out] = true
 				}
 			}

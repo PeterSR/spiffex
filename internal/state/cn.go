@@ -135,6 +135,22 @@ func formOf(cn *nametemplate.CN, td, prefix string, emptyName bool) (f cnForm, d
 	return f, dead
 }
 
+// mayStartWithSlash reports whether a name of the form can start with /. A
+// template's own text never does (ParseCN refuses it), so only a value that
+// can come first can.
+func (f cnForm) mayStartWithSlash() bool {
+	if f.lead != "" || f.hashN > 0 {
+		return false
+	}
+	switch {
+	case f.v.known != "":
+		return f.v.known[0] == '/'
+	case f.v.end == endNotSlash:
+		return false
+	}
+	return true
+}
+
 func (f cnForm) minLen() int {
 	if f.hashN > 0 {
 		return len(f.lead) + f.hashN + len(f.tail)
@@ -257,6 +273,8 @@ func (x *expansion) expandCN(e *Expanded, o *Origin, p *Provider, emptyName bool
 	switch {
 	case dead != nil:
 		report("origin %s: %s can never apply to its identities, which all have a path starting with %s", x.name, dead, e.Prefix)
+	case f.mayStartWithSlash():
+		report("origin %s: its common names can start with /, which PostgreSQL reads as a regular expression in pg_ident.conf; start the template with text, or trim the leading / (for instance {path|trim_prefix:/})", x.name)
 	case f.minLen() > nametemplate.MaxCNLength:
 		report("origin %s: its common names are at least %d characters, more than the %d allowed", x.name, f.minLen(), nametemplate.MaxCNLength)
 	default:
@@ -324,4 +342,13 @@ func (e *Expanded) cnText() string {
 		return "{spiffe_id}"
 	}
 	return e.X509CN.String()
+}
+
+// CommonNamesMayClash reports whether the X.509-SVIDs of two origins could
+// have the same common name (SPEC section 4.6).
+func CommonNamesMayClash(a, b *Expanded) bool {
+	if a.cn == nil || b.cn == nil || !a.AllowsSVIDType("x509") || !b.AllowsSVIDType("x509") || overlap(a.Prefix, b.Prefix) {
+		return false
+	}
+	return !cnDisjoint(*a.cn, *b.cn)
 }

@@ -391,10 +391,10 @@ func TestCheckReportsX509CNUnused(t *testing.T) {
 		}
 		return result
 	}
-	if got := check(map[string]any{"provider": "keys", "x509": map[string]any{"cn": "{path}"}, "svid_types": []string{"jwt"}}).X509CNUnused; len(got) != 1 || got[0] != "web" {
+	if got := check(map[string]any{"provider": "keys", "x509": map[string]any{"cn": "p:{path}"}, "svid_types": []string{"jwt"}}).X509CNUnused; len(got) != 1 || got[0] != "web" {
 		t.Errorf("x509_cn_unused = %v, want [web]", got)
 	}
-	if got := check(map[string]any{"provider": "keys", "x509": map[string]any{"cn": "{path}"}}).X509CNUnused; len(got) != 0 {
+	if got := check(map[string]any{"provider": "keys", "x509": map[string]any{"cn": "p:{path}"}}).X509CNUnused; len(got) != 0 {
 		t.Errorf("x509_cn_unused = %v, want none", got)
 	}
 }
@@ -406,4 +406,29 @@ func wrapHandler(next http.Handler, path string, hit func()) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// A clash of X.509 common names with an origin the caller may not read is a
+// 409 that names the origin and nothing of its template or prefix, whichever
+// of the two names sorts first.
+func TestHiddenOriginCommonNameClash(t *testing.T) {
+	h := newHarness(t, fileStore(t), people)
+	withCN := func(prefix string) map[string]any {
+		o := keysOrigin(prefix)
+		o["x509"] = map[string]any{"cn": "t:{path|trim_prefix:" + prefix + "/}"}
+		return o
+	}
+	wantStatus(t, h.as("/people/alice", http.MethodPut, "/origins/secret", withCN("/secret")), http.StatusOK)
+	for _, name := range []string{"aaa", "zzz"} {
+		a := h.as("/people/bob", http.MethodPut, "/origins/"+name, withCN("/team/"+name))
+		wantStatus(t, a, http.StatusConflict)
+		msg := a.errorBody(t).Error
+		if msg != "its X.509 common names could equal those of origin secret, which you may not read" || strings.Contains(msg, "t:") || strings.Contains(msg, "/secret") {
+			t.Errorf("%s: conflict reason %q", name, msg)
+		}
+		// With text of its own there is no clash.
+		o := keysOrigin("/team/" + name)
+		o["x509"] = map[string]any{"cn": name + ":{path|trim_prefix:/team/" + name + "/}"}
+		wantStatus(t, h.as("/people/bob", http.MethodPut, "/origins/"+name, o), http.StatusCreated)
+	}
 }

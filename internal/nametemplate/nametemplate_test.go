@@ -170,16 +170,16 @@ func TestHashOperationInNames(t *testing.T) {
 		template, value, want string
 		ok                    bool
 	}{
-		{"{v|hash:16}", "abc", "xj4bnp4pahh6uqkb", true},
+		{"{v|hash:24}", "abc", "xj4bnp4pahh6uqkbidpf3lrc", true},
 		{"{v|hash:52}", "abc", "xj4bnp4pahh6uqkbidpf3lrceoyagyndsylxvhfucd7wd4qacwwq", true},
-		{"t/{v|hash:20}/x", "abc", "t/xj4bnp4pahh6uqkbidpf/x", true},
+		{"t/{v|hash:24}/x", "abc", "t/xj4bnp4pahh6uqkbidpf3lrc/x", true},
 		// Any value can be hashed, whatever it holds.
-		{"{v|hash:16}", "a/b c", HashValue("a/b c", 16), true},
+		{"{v|hash:24}", "a/b c", HashValue("a/b c", 24), true},
 		// Trims before and after.
-		{"{v|trim_prefix:team-|hash:16}", "team-abc", "xj4bnp4pahh6uqkb", true},
-		{"{v|trim_prefix:team-|hash:16}", "abc", "", false},
-		{"{v|hash:16|trim_prefix:xj4b}", "abc", "np4pahh6uqkb", true},
-		{"{v|hash:16|trim_prefix:zz}", "abc", "", false},
+		{"{v|trim_prefix:team-|hash:24}", "team-abc", "xj4bnp4pahh6uqkbidpf3lrc", true},
+		{"{v|trim_prefix:team-|hash:24}", "abc", "", false},
+		{"{v|hash:24|trim_prefix:xj4b}", "abc", "np4pahh6uqkbidpf3lrc", true},
+		{"{v|hash:24|trim_prefix:zz}", "abc", "", false},
 	} {
 		tmpl, err := Parse(tt.template, Options{})
 		if err != nil {
@@ -196,7 +196,7 @@ func TestHashOperationInNames(t *testing.T) {
 }
 
 func TestHashArgument(t *testing.T) {
-	for _, arg := range []string{"15", "53", "0", "-16", "+16", "016", "1e1", "16.0", " 16", "x", "", "99999999999999999999"} {
+	for _, arg := range []string{"15", "23", "53", "0", "-16", "+16", "016", "1e1", "16.0", " 16", "x", "", "99999999999999999999"} {
 		if _, err := Parse("{v|hash:"+arg+"}", Options{}); err == nil {
 			t.Errorf("hash:%q parsed", arg)
 		}
@@ -204,7 +204,7 @@ func TestHashArgument(t *testing.T) {
 			t.Errorf("CN hash:%q parsed", arg)
 		}
 	}
-	for _, arg := range []string{"16", "17", "51", "52"} {
+	for _, arg := range []string{"24", "25", "51", "52"} {
 		if _, err := Parse("{v|hash:"+arg+"}", Options{}); err != nil {
 			t.Errorf("hash:%s: %v", arg, err)
 		}
@@ -212,7 +212,7 @@ func TestHashArgument(t *testing.T) {
 	if _, err := Parse("{v|hash}", Options{}); err == nil {
 		t.Error("hash without an argument parsed")
 	}
-	if _, err := Parse("{v|hash:16}", Options{NoOps: true}); !errors.Is(err, ErrNoOps) {
+	if _, err := Parse("{v|hash:24}", Options{NoOps: true}); !errors.Is(err, ErrNoOps) {
 		t.Errorf("NoOps: err = %v", err)
 	}
 }
@@ -224,12 +224,16 @@ func TestParseCN(t *testing.T) {
 	}{
 		{"{path}", true},
 		{"{spiffe_id}", true},
+		{"/{path}", false},
+		{"/b{path}", false},
+		{"//x{path}", false},
+		{"b/{path}", true},
 		{"{path|trim_prefix:/tenants/}", true},
 		{"{path|trim_prefix:/tenants/|trim_suffix:/backend}", true},
 		{"{spiffe_id|trim_prefix:spiffe://example.org}", true},
 		{"{path|hash:24}", true},
 		{"{path|trim_prefix:/tenants/|hash:24}", true},
-		{"pg:{path|hash:16}", true},
+		{"pg:{path|hash:24}", true},
 		{"{path}:db", true},
 		{"app-{path|trim_prefix:/a/}.v1", true},
 		// No placeholder, two, or an unknown one.
@@ -243,8 +247,8 @@ func TestParseCN(t *testing.T) {
 		{"path}", false},
 		{"}{path}", false},
 		// A hash is last, and there is at most one.
-		{"{path|hash:16|trim_prefix:x}", false},
-		{"{path|hash:16|hash:16}", false},
+		{"{path|hash:24|trim_prefix:x}", false},
+		{"{path|hash:24|hash:24}", false},
 		// Operations.
 		{"{path|}", false},
 		{"{path|upper:x}", false},
@@ -281,16 +285,22 @@ func TestRenderCN(t *testing.T) {
 		template, want string
 		ok             bool
 	}{
-		{"{path}", path, true},
 		{"{spiffe_id}", id, true},
+		{"{path|trim_prefix:/}", "tenants/kokkenogco/backend", true},
+		{"pg:{path}", "pg:" + path, true},
+		// A name never starts with /, which PostgreSQL reads as a regex.
+		{"{path}", "", false},
+		{"{path|trim_suffix:/backend}", "", false},
+		{"{path|trim_prefix:/tenants}", "", false},
 		{"{path|trim_prefix:/tenants/}", "kokkenogco/backend", true},
 		{"{path|trim_prefix:/tenants/|trim_suffix:/backend}", "kokkenogco", true},
 		{"db:{path|trim_prefix:/tenants/}", "db:kokkenogco/backend", true},
 		{"{path|trim_prefix:/tenants/}-pg", "kokkenogco/backend-pg", true},
-		{"{spiffe_id|trim_prefix:spiffe://example.org}", path, true},
-		{"{path|hash:16}", HashValue(path, 16), true},
+		{"{spiffe_id|trim_prefix:spiffe://example.org}", "", false},
+		{"{spiffe_id|trim_prefix:spiffe://example.org/}", "tenants/kokkenogco/backend", true},
+		{"{path|hash:24}", HashValue(path, 24), true},
 		{"x-{path|hash:30}", "x-" + HashValue(path, 30), true},
-		{"{path|trim_prefix:/tenants/|hash:16}", HashValue("kokkenogco/backend", 16), true},
+		{"{path|trim_prefix:/tenants/|hash:24}", HashValue("kokkenogco/backend", 24), true},
 		// A trim that does not apply refuses the value.
 		{"{path|trim_prefix:/other/}", "", false},
 		{"{path|trim_suffix:/frontend}", "", false},

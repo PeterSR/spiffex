@@ -43,7 +43,9 @@ type CN struct {
 // template or in the argument of one of its trim operations: the characters of
 // a path segment, plus / and :. They are printable ASCII that is valid in a
 // PrintableString and in a UTF8String, and none of them is special in a
-// distinguished name's string form (RFC 4514) or in pg_ident.conf unquoted.
+// distinguished name's string form (RFC 4514). A leading / is special to
+// PostgreSQL, which reads a pg_ident.conf system user that starts with one as
+// a regular expression, so a name never starts with it (see ParseCN, Render).
 func cnLiteral(c byte) bool {
 	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
 		c == '.' || c == '_' || c == '-' || c == '/' || c == ':'
@@ -71,6 +73,9 @@ func ParseCN(s string) (*CN, error) {
 		return nil, fmt.Errorf("common name template %q: unclosed {", s)
 	}
 	cn := &CN{Lead: s[:open], Tail: s[end+1:]}
+	if strings.HasPrefix(cn.Lead, "/") {
+		return nil, fmt.Errorf("common name template %q: the name must not start with /, which PostgreSQL reads as a regular expression in pg_ident.conf; start with text, or trim the leading / with trim_prefix", s)
+	}
 	inner := s[open+1 : end]
 	if strings.Contains(inner, "{") || strings.ContainsAny(cn.Tail, "{}") {
 		return nil, fmt.Errorf("common name template %q: it has exactly one placeholder", s)
@@ -163,6 +168,9 @@ func (c *CN) Render(spiffeID, path string) (string, error) {
 		return "", fmt.Errorf("{%s} is %q, which its operations leave empty", c.Placeholder, raw)
 	}
 	out := c.Lead + v + c.Tail
+	if strings.HasPrefix(out, "/") {
+		return "", fmt.Errorf("the common name %q starts with /, which PostgreSQL reads as a regular expression", out)
+	}
 	if len(out) > MaxCNLength {
 		return "", fmt.Errorf("the common name %q is %d characters, more than the %d allowed", out, len(out), MaxCNLength)
 	}

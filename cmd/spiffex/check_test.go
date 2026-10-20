@@ -64,7 +64,7 @@ func TestCheck(t *testing.T) {
 		t.Errorf("x509 under a restriction: %v\n%s", err, out)
 	}
 
-	unused := writeFile(t, dir, "unused.yaml", "origins:\n  a: { provider: keys, x509: { cn: \"{path}\" }, svid_types: [jwt] }\n")
+	unused := writeFile(t, dir, "unused.yaml", "origins:\n  a: { provider: keys, x509: { cn: \"p:{path}\" }, svid_types: [jwt] }\n")
 	out, err = captureStdout(t, func() error { return runCheck(t.Context(), append(issuerFlags, unused)) })
 	if err != nil || out != "warning: origin a sets x509.cn but does not list x509 in svid_types, so it never applies\n" {
 		t.Errorf("x509.cn without x509: %v\n%s", err, out)

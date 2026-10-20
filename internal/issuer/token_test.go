@@ -152,7 +152,7 @@ origins:
       narrowx: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
   cnpath:
     provider: keys
-    x509: { cn: "{path}" }
+    x509: { cn: "{path|trim_prefix:/}" }
     members:
       m: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
   cnhash:

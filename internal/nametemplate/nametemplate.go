@@ -37,9 +37,9 @@ const (
 )
 
 // The bounds of the argument of the hash operation: the number of characters
-// kept. 16 base32 characters are 80 bits, and 52 is the whole digest.
+// kept. 24 base32 characters are 120 bits, and 52 is the whole digest.
 const (
-	MinHashLength = 16
+	MinHashLength = 24
 	MaxHashLength = 52
 )
 
@@ -49,7 +49,7 @@ var hashEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 // (RFC 4648 alphabet) encoding of the SHA-256 digest of v. Its characters are
 // a-z and 2-7, so it is a valid path segment. Two different values give the
 // same result only when their digests agree on the first 5n bits, which for
-// n of at least 16 means 80 bits.
+// n of at least 16 means 120 bits.
 func HashValue(v string, n int) string {
 	sum := sha256.Sum256([]byte(v))
 	return strings.ToLower(hashEncoding.EncodeToString(sum[:]))[:n]

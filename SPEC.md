@@ -570,12 +570,12 @@ cannot fill a placeholder. The operations apply to the claim's value in the orde
 The argument of a trim is 1 to 255 characters from `A-Z a-z 0-9 . _ -`. When the value does not
 start, or end, with the argument, the request is rejected; the value is never passed through
 unchanged, or `team-a` and `a` would both become `a`. The argument of `hash` is a whole number in
-decimal from 16 to 52, written without a sign or leading zeros; its result is always a valid
+decimal from 24 to 52, written without a sign or leading zeros; its result is always a valid
 segment, whatever the value held, which makes `hash` the way to use a claim whose value is not
 one. The trims are one-to-one in the way above, so a template with only trims never gives two
 different values the same SPIFFE ID. `hash` is one-to-one up to collisions of a truncated SHA-256:
 two values share a result only when their digests agree on the first `<n>` base32 characters, 5
-bits each, so 80 bits at the least. An operation after a `hash` works on its result. An unknown
+bits each, so 120 bits at the least. An operation after a `hash` works on its result. An unknown
 operation makes the template invalid.
 
 A placeholder's value, after its operations, MUST be a valid segment, or the request is rejected;
@@ -669,7 +669,7 @@ sets one, the common name is the SPIFFE ID, and none when the SPIFFE ID exceeds 
 
 A common name template is literal text around **exactly one** placeholder. The placeholder is
 `{spiffe_id}`, the full SPIFFE ID (`spiffe://<trust domain><path>`), or `{path}`, its path, which
-starts with `/`. Placeholders come from the issued SPIFFE ID alone and never from the subject token's
+starts with `/` (see below for why a name must not). Placeholders come from the issued SPIFFE ID alone and never from the subject token's
 claims: a common name must identify exactly one SPIFFE ID, and a name derived from claims could give
 two identities the same one. The placeholder MAY list operations as in section 4.1, with these
 differences: the argument of a trim is 1 to 64 characters from the set below, and `hash`, if there
@@ -680,9 +680,19 @@ escape for `{`, `}` or `|` exists. Examples, for `spiffe://example.org/tenants/k
 | `x509.cn` | Common name |
 |---|---|
 | `{spiffe_id}` | `spiffe://example.org/tenants/kokkenogco/backend` |
-| `{path}` | `/tenants/kokkenogco/backend` |
+| `{path\|trim_prefix:/}` | `tenants/kokkenogco/backend` |
 | `{path\|trim_prefix:/tenants/}` | `kokkenogco/backend` |
 | `pg:{path\|hash:24}` | `pg:` and 24 characters of `a-z 2-7` |
+
+**A common name never starts with `/`.** PostgreSQL reads a `pg_ident.conf` system user that starts
+with `/` as a regular expression, quoted or not, and an unanchored one: a line for
+`/tenants/x/backend` would also admit `/zz/tenants/x/backend`. So a template whose literal text
+starts with `/` is invalid, and so is one whose names can start with `/`, such as `{path}` alone,
+`{path|trim_suffix:...}`, or a trim of the prefix that leaves the `/` (`trim_prefix:/tenants`). Trim
+it away (`{path|trim_prefix:/}`), trim more, or start with text (`pg:{path}`). The issuer MUST also
+refuse, as below, a name that would start with `/`. The default name, the full `spiffe://...` ID,
+does not start with `/`. A hand-written `pg_ident.conf` line that does start with `/` MUST be
+anchored (`^...$`) to match only itself.
 
 The common name is the template filled in, and MUST be 1 to 64 characters, the upper bound of
 [RFC 5280]. When an operation does not apply to the identity, leaves nothing, or the result exceeds
@@ -692,7 +702,7 @@ check happens after the `csr` is checked, so the assertion's `jti` is consumed a
 
 **Names do not clash.** Within an origin the template is one-to-one by construction: one placeholder,
 fixed text around it, trims that refuse what they do not apply to, and a final `hash`, which is
-one-to-one up to its collisions (section 4.1: at least 80 bits). Between origins, validation
+one-to-one up to its collisions (section 4.1: at least 120 bits). Between origins, validation
 (section 6.2) MUST refuse a state in which two origins that may issue X.509-SVIDs could issue the same
 common name. An implementation MAY use any sufficient test that is sound: it MUST NOT accept a pair
 that can clash, and MAY refuse a pair that cannot. The test of the reference implementation describes
@@ -703,11 +713,14 @@ It follows each trim through that description, and accepts a pair when the descr
 some position differs, or that one name ends where the other goes on, or that the characters of one
 cannot be those of the other. Two hashes are accepted when they have the same length and text and
 their inputs cannot be equal. So `{path|trim_prefix:/tenants/}` is accepted next to the default and
-next to `{path}`, but not next to another origin's `{path|trim_prefix:/other/}`, nor next to a
-`{path|hash:20}` (a tenant could be named like a hash); the usual remedy is text that differs in
+next to `{path|trim_prefix:/}`, but not next to another origin's `{path|trim_prefix:/other/}`, nor next to a
+`{path|hash:24}` (a tenant could be named like a hash); the usual remedy is text that differs in
 each origin's template, as in `tenant:{path|trim_prefix:/tenants/}` and `other:{path|...}`.
 A template with a trim that can never apply to any identity of the origin, or whose names are
-always more than 64 characters, is invalid. An origin whose `svid_types` lacks `x509` is left out of
+always more than 64 characters, is invalid. The check covers one state: after a template changes,
+or a name shape passes from one origin to another, certificates already issued with the old names stay
+valid for up to the X.509-SVID lifetime (section 7.2), so an operator SHOULD wait that long before
+mapping a name that was freed to a different role. An origin whose `svid_types` lacks `x509` is left out of
 the comparison, and setting `x509.cn` on it is allowed, but the validator SHOULD report it without
 refusing the state.
 
