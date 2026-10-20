@@ -229,7 +229,7 @@ func TestTokenCommandAsksLastWhatCostsACertificate(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		w.Write(body)
+		_, _ = w.Write(body)
 	})
 	mux.HandleFunc("/token", func(http.ResponseWriter, *http.Request) { tokenHits.Add(1) })
 	srv = httptest.NewServer(mux)

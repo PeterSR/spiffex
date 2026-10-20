@@ -172,7 +172,9 @@ func (f *fakeX509Issuer) serveBundle(w http.ResponseWriter, _ *http.Request) {
 	}
 	b := spiffebundle.New(td)
 	if !f.withoutJWT.Load() {
-		b.AddJWTAuthority("k1", jwtKey.Public())
+		if err := b.AddJWTAuthority("k1", jwtKey.Public()); err != nil {
+			f.t.Error(err)
+		}
 	}
 	b.SetX509Authorities(f.rootCerts())
 	if hook := f.bundleHook.Load(); hook != nil {
