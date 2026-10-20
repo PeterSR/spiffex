@@ -1003,7 +1003,11 @@ func TestX509KeysStayInMemory(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		d := parsedKey.(*ecdsa.PrivateKey).D
+		raw, err := parsedKey.(*ecdsa.PrivateKey).Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := new(big.Int).SetBytes(raw)
 		forms := map[string]string{
 			"base64":    base64.StdEncoding.EncodeToString(der),
 			"base64url": base64.RawURLEncoding.EncodeToString(der),

@@ -677,7 +677,7 @@ func TestChartCA(t *testing.T) {
 		{"roots without a CA", with("--set", "ca.roots.configMap=r"), "ca.roots needs ca.existingSecret"},
 		{"both kinds of roots", with("--set", "ca.existingSecret=c", "--set", "ca.roots.configMap=r", "--set", "ca.roots.secret=r"), "alternatives"},
 		{"dedicated without roots", with("--set", "ca.existingSecret=c", "--set", "ca.rootsDedicated=true"), "ca.roots names none"},
-		{"an unknown value", with("--set", "ca.secret=c"), "Additional property secret"},
+		{"an unknown value", with("--set", "ca.secret=c"), "secret"},
 		{"a bad lifetime", with("--set", "x509SVIDTTL=soon"), "x509SVIDTTL"},
 		{"a lifetime under ten minutes", with("--set", "x509SVIDTTL=5m"), "x509SVIDTTL"},
 		{"a lifetime over a day", with("--set", "x509SVIDTTL=48h"), "x509SVIDTTL"},

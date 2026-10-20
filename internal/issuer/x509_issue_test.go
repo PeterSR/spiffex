@@ -270,6 +270,7 @@ func TestX509IgnoresEveryCSRField(t *testing.T) {
 			{Id: asn1.ObjectIdentifier{1, 2, 3, 4, 5}, Critical: true, Value: []byte{0x05, 0x00}},                  // unknown and critical
 			{Id: asn1.ObjectIdentifier{2, 5, 29, 14}, Value: []byte{0x04, 0x03, 'e', 'v', 'l'}},                    // subject key identifier
 		},
+		//lint:ignore SA1019 the test needs a challengePassword attribute, which only Attributes can carry
 		Attributes: []pkix.AttributeTypeAndValueSET{{
 			Type:  oidChallenge,
 			Value: [][]pkix.AttributeTypeAndValue{{{Type: oidChallenge, Value: "hunter2"}}},
