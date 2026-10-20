@@ -31,6 +31,7 @@ var commands = []command{
 	{"token", "fetch a JWT-SVID from the issuer and print it", runToken},
 	{"health", "check that an agent is serving, for container probes", runHealth},
 	{"key", "generate and manage keys", runKey},
+	{"ca", "make and manage the certificate authority for X.509-SVIDs", runCA},
 	{"check", "validate a state document, a provider or an origin", runCheck},
 	{"provider", "list the shipped providers and print them", runProvider},
 	{"bootstrap", "write the first origin, member and grant to the stored state", runBootstrap},

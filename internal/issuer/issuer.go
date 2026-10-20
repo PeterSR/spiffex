@@ -22,6 +22,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/bundle/spiffebundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
+	"github.com/PeterSR/spiffex/internal/ca"
 	"github.com/PeterSR/spiffex/internal/keyset"
 	"github.com/PeterSR/spiffex/internal/policy"
 	"github.com/PeterSR/spiffex/internal/settings"
@@ -44,12 +45,19 @@ const (
 const (
 	DefaultTokenTTL        = settings.DefaultTokenTTL
 	DefaultActivationDelay = settings.DefaultActivationDelay
+	DefaultX509SVIDTTL     = settings.DefaultX509SVIDTTL
 )
 
 // KeySource supplies the current signing keys and their sequence number.
 // keyset.Watcher implements it.
 type KeySource interface {
 	Current() (set *keyset.Set, sequence uint64, changed <-chan struct{})
+}
+
+// CASource supplies the current certificate authority and the sequence number
+// of its published anchors. ca.Watcher implements it.
+type CASource interface {
+	Current() (set *ca.Set, sequence uint64, changed <-chan struct{})
 }
 
 // PolicySource supplies the state in service. policy.Policy implements it.
@@ -64,6 +72,10 @@ type Config struct {
 	URL         string
 	TrustDomain spiffeid.TrustDomain
 	Keys        KeySource
+	// CA is the certificate authority (SPEC section 2.5). Nil means the
+	// issuer has none: it publishes no X.509 authorities and issues no
+	// X.509-SVIDs.
+	CA CASource
 	// Policy decides who gets which identity. It is consulted on every
 	// request.
 	Policy PolicySource
@@ -80,6 +92,9 @@ type Config struct {
 	TrustedProxies []netip.Prefix
 	// TokenTTL is the lifetime of issued JWT-SVIDs, at most an hour.
 	TokenTTL time.Duration
+	// X509SVIDTTL is the lifetime of issued X.509-SVIDs, between ten minutes
+	// and a day.
+	X509SVIDTTL time.Duration
 	// ActivationDelay is how long a new key is published before it signs.
 	ActivationDelay time.Duration
 	// RefreshHint is the spiffe_refresh_hint published in the bundle, in
@@ -131,6 +146,12 @@ func New(cfg Config) (*Issuer, error) {
 	}
 	if cfg.TokenTTL < settings.MinTokenTTL || cfg.TokenTTL > settings.MaxTokenTTL {
 		return nil, fmt.Errorf("token TTL %s is out of range (%s to %s)", cfg.TokenTTL, settings.MinTokenTTL, settings.MaxTokenTTL)
+	}
+	if cfg.X509SVIDTTL == 0 {
+		cfg.X509SVIDTTL = DefaultX509SVIDTTL
+	}
+	if cfg.X509SVIDTTL < settings.MinX509SVIDTTL || cfg.X509SVIDTTL > settings.MaxX509SVIDTTL {
+		return nil, fmt.Errorf("X.509-SVID TTL %s is out of range (%s to %s)", cfg.X509SVIDTTL, settings.MinX509SVIDTTL, settings.MaxX509SVIDTTL)
 	}
 	if cfg.ActivationDelay == 0 {
 		cfg.ActivationDelay = DefaultActivationDelay
@@ -256,6 +277,9 @@ func (iss *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	if iss.cfg.Management != nil {
 		doc["spiffex_management_endpoint"] = iss.ManagementEndpoint()
 	}
+	if iss.x509Usable() {
+		doc["spiffex_x509_svid_supported"] = true
+	}
 	writeJSON(w, http.StatusOK, doc, iss.publicCache())
 }
 
@@ -281,6 +305,16 @@ func (iss *Issuer) handleBundle(w http.ResponseWriter, _ *http.Request) {
 	writeBody(w, http.StatusOK, body, iss.publicCache())
 }
 
+// x509Usable reports whether the issuer has a certificate authority that can
+// sign an X.509-SVID now (SPEC section 2.1).
+func (iss *Issuer) x509Usable() bool {
+	if iss.cfg.CA == nil {
+		return false
+	}
+	set, _, _ := iss.cfg.CA.Current()
+	return set.Usable(iss.cfg.Now(), iss.cfg.X509SVIDTTL)
+}
+
 // Bundle returns the trust domain's SPIFFE bundle document.
 func (iss *Issuer) Bundle() ([]byte, error) {
 	set, seq, _ := iss.cfg.Keys.Current()
@@ -289,6 +323,15 @@ func (iss *Issuer) Bundle() ([]byte, error) {
 		if err := b.AddJWTAuthority(k.ID, k.Signer.Public()); err != nil {
 			return nil, err
 		}
+	}
+	if iss.cfg.CA != nil {
+		cas, caSeq, _ := iss.cfg.CA.Current()
+		for _, a := range cas.Anchors() {
+			b.AddX509Authority(a.Cert)
+		}
+		// Each sequence only grows, and grows when its own set changes, so
+		// their sum grows when either does.
+		seq += caSeq
 	}
 	b.SetSequenceNumber(seq)
 	b.SetRefreshHint(iss.cfg.RefreshHint)

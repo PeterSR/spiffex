@@ -11,6 +11,10 @@ keys_dir: /keys                         # the signing keys, mounted from a Secre
 token_ttl: 5m
 activation_delay: 30m
 
+# To issue X.509-SVIDs as well, give the issuer a certificate authority (docs/configuration.md):
+# ca_dir: /ca                           # made with spiffex ca init, or spiffex ca csr and ca import
+# x509_svid_ttl: 1h
+
 # The state lives in a ConfigMap, read and written through the Kubernetes API. For an issuer
 # outside a cluster, use "file: state.yaml" or "dir: state" instead.
 state:

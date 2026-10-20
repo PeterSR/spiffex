@@ -13,9 +13,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (SPEC section 2.5), X.509 authorities in the SPIFFE bundle (section 2.3), token requests that take
   a `requested_token_type` and a `csr` (section 3.4), `svid_types` on origins and providers to
   choose which kinds of SVID an origin issues (section 4.5), and a complete Workload API server in
-  the agent (section 9). Nothing of this is implemented yet; the state accepts and checks the new
-  `svid_types` field on origins and providers, and the token endpoint refuses a JWT-SVID to an
-  origin whose list lacks `jwt` (`invalid_target`, after authentication).
+  the agent (section 9). The state accepts and checks the new `svid_types` field on origins and
+  providers, and the token endpoint refuses a JWT-SVID to an origin whose list lacks `jwt`
+  (`invalid_target`, after authentication). The token endpoint does not issue X.509-SVIDs yet.
+- The certificate authority for X.509-SVIDs. The settings `ca_dir`, `ca_roots`,
+  `ca_roots_dedicated` and `x509_svid_ttl` give the issuer a CA, a root it holds or an intermediate
+  under the operator's own root. The issuer checks every CA certificate against the profile of SPEC
+  section 2.5, chooses the signing CA with the rotation rules of the signing keys, rereads the
+  directory while it runs, and publishes the trust anchors in the SPIFFE bundle as X.509
+  authorities (`use: x509-svid`, with `x5c`), counted into `spiffe_sequence`. The JWKS never holds
+  them. The discovery document says `spiffex_x509_svid_supported: true` while a CA can sign.
+  `spiffex ca init`, `csr`, `import`, `list` and `prune` make and manage the CA files.
 
 ## [0.1.3] - 2026-10-19
 

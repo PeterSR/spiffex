@@ -15,6 +15,12 @@ keys_dir: /var/lib/spiffex/keys        # signing keys
 token_ttl: 5m                          # lifetime of issued JWT-SVIDs (default 5m, at most 1h)
 activation_delay: 30m                  # how long a new signing key is published before it signs (default 30m)
 
+# X.509-SVIDs, optional (see "The certificate authority" below): without ca_dir the issuer has no CA.
+ca_dir: /var/lib/spiffex/ca            # the CA's certificates and keys, apart from keys_dir
+ca_roots: /etc/spiffex/ca-roots.pem    # root certificates of your own CA, when the CA is an intermediate under it
+# ca_roots_dedicated: false            # true: every CA those roots certify is this issuer's (SPEC section 2.5.1)
+x509_svid_ttl: 1h                      # lifetime of issued X.509-SVIDs (default 1h, 10m to 24h)
+
 state:                                 # where the state lives: exactly one of
   file: /etc/spiffex/state.yaml        #   one YAML or JSON document
   # dir: /etc/spiffex/state            #   a directory tree, one file per object
@@ -47,8 +53,8 @@ verifier_user: { uid: 65533, gid: 65533 }   # recommended with verifiers: run th
 trusted_proxies: [10.0.0.0/8]          # optional: peers, such as an ingress, whose X-Forwarded-For names the client
 ```
 
-Run the issuer with `spiffex issuer -config issuer.yaml`. Relative paths in `keys_dir` and `state`
-are relative to the settings file; the file lists must name absolute paths. Unknown fields are
+Run the issuer with `spiffex issuer -config issuer.yaml`. Relative paths in `keys_dir`, `ca_dir`,
+`ca_roots` and `state` are relative to the settings file; the file lists must name absolute paths. Unknown fields are
 refused. The issuer listens on `:8443`, serving TLS when given `-tls-cert` and `-tls-key`, and plain
 HTTP otherwise, for use behind a TLS-terminating proxy, and reloads the TLS certificate when its
 files change. The issuer URL must be what clients and verifiers actually reach, because it is
@@ -97,6 +103,124 @@ Every flag of every command can also be set as an environment variable: `-reload
 `SPIFFEX_RELOAD_INTERVAL`, and so on. The names are shared between commands, so `SPIFFEX_DIR` means
 `-dir` to every command that has one. A repeatable flag such as `-audience` takes a single value
 from the environment.
+
+## The certificate authority
+
+With `ca_dir` set, the issuer has a **certificate authority** (SPEC section 2.5) that signs
+X.509-SVIDs, and publishes its trust anchors in the bundle as X.509 authorities. Without it nothing
+about the issuer changes. `ca_dir` must be a directory of its own, neither `keys_dir` nor inside it or
+containing it, so that a mistake in one mount or Secret does not expose both kinds of key. The
+discovery document says `spiffex_x509_svid_supported: true` while the issuer has a CA that can sign.
+
+The CA is either a **root**, a self-signed CA the issuer itself holds, or an **intermediate** signed
+by a CA of your own, whose root certificates you list in `ca_roots`. A root suits development and
+small setups; an intermediate under a root kept offline is the better production setup, because the
+root can replace a compromised intermediate.
+
+```bash
+# A root:
+spiffex ca init -dir /var/lib/spiffex/ca -trust-domain example.org
+
+# An intermediate: make the key and a request, have the request signed as a CA by your own CA,
+# then install the answer (the signed certificate first, then any CA certificates between it
+# and the root, as PEM).
+spiffex ca csr -dir /var/lib/spiffex/ca -trust-domain example.org -out ca.csr
+spiffex ca import -cert signed.pem -dir /var/lib/spiffex/ca -trust-domain example.org -roots /etc/spiffex/ca-roots.pem
+```
+
+`ca import` takes `-config issuer.yaml` instead of the individual flags. The root is a P-256 key valid for five years by default, at least a day (`-valid-for`);
+`ca csr` also takes `-alg ES384` and `-alg RS256`. Everything the issuer's CA signs with has to meet
+the profile of SPEC section 2.5: a name-constrained CA with a path length of 0 whose key usage is
+`keyCertSign` and `cRLSign` only, with an ECDSA key on P-256 or P-384 or an RSA key of 2048 to 4096
+bits, and no RSASSA-PSS. The request made by `ca csr` asks for exactly that, but a CA is free to
+ignore the request, so `ca import` checks what comes back, and the issuer checks it again every time
+it reads the directory.
+
+The newest CA is the one signed last, so a request imported out of order ranks by its certificate and
+not by the time of its request. Each CA is a pair of files named after the moment it was made, `ca-20261015T120000Z.crt` (PEM: the
+CA certificate, then any CA certificates between it and its root) and `ca-20261015T120000Z.key`
+(PEM, mode 0600). A key without a certificate is a request waiting for `ca import`. A self-signed
+certificate without a key is published as a trust anchor and never signs. Other files are ignored.
+The subject of a CA must differ from every other CA's with a different key; `ca csr` and `ca init`
+make unique ones, and the issuer refuses a CA your CA signed with a subject already in use. Every
+self-signed CA in `ca_dir` and every certificate in `ca_roots` is published as an X.509
+authority; an intermediate is never published, only the root it chains to.
+
+**Roots you bring.** The certificates in `ca_roots` must be self-signed CA certificates. The issuer
+cannot see the other CAs such a root certifies, and a verifier that trusts the root accepts any chain
+to it with a `spiffe://example.org/...` identity, so each root must either carry the full name
+constraints of SPEC section 2.5 (critical; permitting only the URI `example.org`; excluding the URI
+`.example.org`, every DNS name, IP address and mailbox; no directory names) or be declared dedicated to
+the trust domain with `ca_roots_dedicated: true`. Even the full constraints do not stop another CA
+under the same root from minting `spiffe://example.org/...` identities, so share a root only with CAs
+that are yours; dedicated is your statement that every CA certificate the root certifies, directly or
+through others, is one of this issuer's signing CAs or a CA on the path to one, and that those certify
+no other CA. The issuer refuses to start with a root that is neither.
+
+**Rotation** follows the rules of the signing keys. A new CA is published, as a root through the
+bundle or through the root it chains to, for `activation_delay` before the issuer signs with anything
+that chains to it; a new intermediate under a root that has been published that long signs as soon as
+it appears. The issuer signs with the newest CA that may sign, and keeps an old root published until
+`x509_svid_ttl` plus ten minutes after the last time it could have signed with it. The delay counts
+from when the issuer first sees a certificate, whatever its file name or modification time says. To
+replace a root: add the new root to `ca_roots`, or run `spiffex ca init`, wait for `activation_delay`,
+install the CA that chains to it, wait out the retention, then `spiffex ca prune` and remove the old
+root from `ca_roots` (`ca prune` reminds you).
+
+The issuer keeps no state across a restart, and learns when it first saw a certificate from its
+own run. Two cases follow. After adding a root to `ca_roots`, wait `activation_delay` before
+restarting the issuer, or import the intermediate under it only after that time: a restart sooner
+trusts the file name and certificate dates of the intermediate, which a ceremony at an offline root
+can make old, and it signs under a root no verifier has seen. And a root that left the bundle needs
+`activation_delay` after it returns, which the running issuer enforces but a restart forgets, so do not
+import a CA under a root the bundle dropped and restart within that time (`ca import` warns).
+
+```bash
+spiffex ca list -config issuer.yaml      # each CA's state, and the anchors
+spiffex ca prune -config issuer.yaml -dry-run
+spiffex ca prune -config issuer.yaml
+```
+
+Like `spiffex key list` and `key prune`, these refuse to guess: they read the issuer's settings with
+`-config`, or need `-dir`, `-trust-domain`, `-activation-delay` and `-x509-svid-ttl` all given, with
+`-roots` and `-roots-dedicated` as the issuer has them. `ca prune` deletes the files of CAs no verifier
+can need any more; run it only against the directory the issuer reads, after the retention has passed
+there.
+
+**Expiry.** The issuer signs with the newest CA that may sign. When its chain, up to and including its
+root, ends within a full `x509_svid_ttl`, the issuer logs a warning and issues shorter X.509-SVIDs,
+ending with the chain, and it refuses a request when less than five minutes would be left. An older
+CA does not take over, not even when the newest has ended: its root leaves the bundle once the newest
+has been active for the retention, and what it signed later would outlive that. It warns from thirty
+days before the earliest end of the chain it signs with. A CA past its end signs nothing, and the root
+`ca init` makes lasts five years (`-valid-for`) and is not renewed by anything. Add the successor
+well before.
+
+**While it runs.** The issuer rereads `ca_dir` and `ca_roots` every `-reload-interval`. At startup a
+CA that fails its checks, or whose chain does not verify against a root the issuer publishes, keeps the
+issuer from starting. Later, a new certificate that fails them is logged and not used or published,
+and a CA in service whose files turn bad stays in service as it was, unless its key file was removed: that stops it,
+as for a root. A root that left the bundle once nothing used it any more is published afresh, with the
+activation delay, if a CA that chains to it appears again. The issuer never signs with a CA whose root
+retention has dropped from the bundle. When the key of the last CA is
+removed, the issuer goes on publishing the anchors but signs nothing until a CA is added, and
+discovery leaves out `spiffex_x509_svid_supported`; it starts without a usable CA when every CA has
+expired, and says so in the log. A CA that only has a certificate in `ca_dir`, without a key, never
+signs: that is how a compromised key is taken out of service at once. A restart is similar: a
+certificate without a key that is not a root is skipped with a warning (delete it too when you are done
+with it), and a `ca_dir` that still has anchors but no CA with a key starts, logs an error, publishes
+the anchors, signs no X.509-SVIDs and leaves JWT-SVIDs alone. A `ca_dir` and `ca_roots` with no anchor
+at all do not start. The restart does not remember what the running issuer knew, though: if you remove
+a key while an older CA is still in `ca_dir`, whose root had already left the bundle, a restart within
+`activation_delay` lets that older CA sign at once, under a root verifiers may have dropped. After
+removing a key, run `ca prune` to remove the older CAs that are retired, and wait `activation_delay`
+before restarting the issuer. The issuer warns when it starts with such a CA.
+
+**Verifiers and the CA keys.** With `verifier_user`, the issuer refuses to start if that user can read
+a `.key` file in `ca_dir`, judged as for `keys_dir`, or if a default ACL on `ca_dir` lets it read new
+ones; the certificates are public and not judged. A CA key that becomes readable to it later is marked
+exposed: its certificate stays published, but it never signs again, and a new CA key it can read is
+neither used nor published.
 
 ## The state
 

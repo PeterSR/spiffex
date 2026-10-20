@@ -21,6 +21,17 @@ type User struct {
 // hidden entries and directories, or any of the other files, or when a
 // default ACL on keysDir would let it read files added there later.
 func CheckFiles(u User, keysDir string, others ...string) error {
+	return checkFiles(u, keysDir, func(string) bool { return true }, others...)
+}
+
+// CheckFilesWithSuffix is CheckFiles for a directory that also holds files
+// meant to be public, such as certificates: only the files whose names end in
+// suffix are judged.
+func CheckFilesWithSuffix(u User, dir, suffix string, others ...string) error {
+	return checkFiles(u, dir, func(name string) bool { return strings.HasSuffix(name, suffix) }, others...)
+}
+
+func checkFiles(u User, keysDir string, judged func(name string) bool, others ...string) error {
 	if why, err := DefaultReadable(u, keysDir); err != nil {
 		return err
 	} else if why != "" {
@@ -34,7 +45,7 @@ func CheckFiles(u User, keysDir string, others ...string) error {
 	for _, e := range entries {
 		// Hidden entries are not keys: a Kubernetes Secret mount keeps its
 		// ..data links there.
-		if !strings.HasPrefix(e.Name(), ".") {
+		if !strings.HasPrefix(e.Name(), ".") && judged(e.Name()) {
 			files = append(files, filepath.Join(keysDir, e.Name()))
 		}
 	}

@@ -194,7 +194,10 @@ later.
 
 The issuer rereads `ca_dir` and `ca_roots` while it runs. A certificate that fails these checks or
 those of section 2.5.1 at startup stops the issuer from starting; one that appears later is not used
-or published, the issuer logs why, and it goes on with the CAs it already has.
+or published, the issuer logs why, and it goes on with the CAs it already has. A CA certificate
+whose key was removed is not such a failure: it never signs (the way to stop a compromised CA), the
+issuer starts without it, and one left with anchors but no CA that can sign publishes the anchors and
+issues no X.509-SVIDs.
 
 **Rotation** follows the rules of section 2.4, applied to anchors rather than to every CA
 certificate:
@@ -206,17 +209,20 @@ certificate:
 
 As in section 2.4, the delay is measured from when the issuer first publishes the anchor, and when
 no anchor has completed it, as in a newly created trust domain, the issuer signs with the signing CA
-it would have used had it been running all along, or else with the oldest.
+it would have used had it been running all along, or else with the oldest. The exception is an
+anchor the issuer, while running, published again after it had left the bundle: no CA under it signs
+until the delay has passed, even if that leaves no CA able to sign.
 
 A new intermediate under an anchor whose activation delay has passed may sign at once. Among the
 usable signing CAs the issuer signs with the newest. The activation delay SHOULD exceed the time
 consumers that reload certificates from files need to pick up a new anchor.
 
-**Expiry.** The issuer SHOULD prefer a signing CA whose whole chain, up to and including the anchor,
-outlives a full X.509-SVID lifetime. When none does it issues the shorter X.509-SVID that section
-3.4 allows, and logs a warning; it refuses X.509-SVID requests with `server_error` only when the
-leaf's `notAfter` would be less than 5 minutes after the current time. It SHOULD warn from 30 days
-before the earliest `notAfter` of the chain.
+**Expiry.** The issuer signs with the newest signing CA that may sign and does not fall back to an
+older one, whose anchor may leave the bundle (rule 2) while the certificates it signed are valid.
+When the newest CA's chain, up to and including the anchor, ends within a full X.509-SVID lifetime,
+it issues the shorter X.509-SVID that section 3.4 allows, and logs a warning; it refuses X.509-SVID
+requests with `server_error` only when the leaf's `notAfter` would be less than 5 minutes after the
+current time. It SHOULD warn from 30 days before the earliest `notAfter` of the chain.
 
 #### 2.5.1 With an intermediate
 
@@ -229,11 +235,16 @@ The anchor widens the trust domain to everything it signs: every verifier then a
 that root that carries a `spiffe://<trust domain>/...` URI SAN, including chains through the
 operator's other CAs, and the signing CA's name constraints protect nothing against a sibling that
 has none. The issuer cannot see siblings, so it asks the operator. Each root MUST either carry the
-name constraints above, or be dedicated to this trust domain: every CA certificate it certifies,
-directly or through other CAs, is one of this issuer's signing CAs or a CA on the path to one, and
-those CAs certify no other CA. The issuer refuses to start with a root that has no such name
-constraints unless the setting `ca_roots_dedicated` is `true`, by which the operator states the
-second.
+full set of name constraints above, exactly, or be dedicated to this trust domain: every CA
+certificate it certifies, directly or through other CAs, is one of this issuer's signing CAs or a CA
+on the path to one, and those CAs certify no other CA. The issuer refuses to start with a root that
+does not carry the full set unless the setting `ca_roots_dedicated` is `true`, by which the operator
+states the second.
+
+Even the full set does not stop a sibling CA under a shared root from minting
+`spiffe://<trust domain>/...` identities: name constraints only confine what a root can certify to
+this trust domain. A shared root is therefore safe only when every CA under it is the operator's own,
+and `ca_roots_dedicated` is the operator's statement that it is.
 
 ## 3. The token endpoint
 
@@ -1217,6 +1228,10 @@ X.509-SVIDs.
 - **Name constraints are the CA's fence.** A verifier that does not enforce them trusts a stolen CA
   key for any name it accepts, not only SPIFFE IDs of this trust domain. Pin the trust domain's
   bundle only in the places that should accept these identities, never in a system trust store.
+  Enforcement differs between verifiers: OpenSSL does not apply the excluded `rfc822Name` subtree to
+  email SANs, so a verifier MUST take the identity from the URI SAN alone and ignore every other
+  name. A shared root (section 2.5.1) is not fenced against sibling CAs minting identities of this
+  trust domain, whatever its constraints say; only `ca_roots_dedicated` states that none exist.
 - **X.509-SVIDs carry no DNS name.** So a server that must be reached by name keeps a certificate
   for its DNS name from another CA (a database with libpq `sslmode=verify-full`, for one). A TLS
   client that trusts the bundle but cannot authorize the server's SPIFFE ID (libpq with
