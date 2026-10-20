@@ -153,7 +153,9 @@ Helm reads values as YAML 1.1, so a grant written into `state.content` needs its
 The release name `spiffex-issuer` gives the issuer URL `https://spiffex-issuer.spiffex.svc` used
 throughout this page. The state ConfigMap is then `spiffex-issuer-state`, and the first grant is
 written with `spiffex bootstrap` in an issuer pod as above. Instead of a TLS Secret, the chart can
-ask cert-manager for the certificate (`tls.certManager`).
+ask cert-manager for the certificate (`tls.certManager`). With a certificate authority in a Secret
+(`ca.existingSecret`, and `ca.roots` for an intermediate under your own root) the issuer also issues
+X.509-SVIDs; see [the chart README](../charts/spiffex/README.md#the-certificate-authority).
 
 The chart writes `state.content` to the state ConfigMap on install only, and never overwrites it
 afterwards, since the management API owns it from then on; `helm uninstall` leaves it in place.
@@ -203,3 +205,6 @@ kind, kubectl, openssl and Go, and removes the cluster and the images it built w
 [test/e2e/kind-helm.sh](../test/e2e/kind-helm.sh) runs the same test with the issuer installed by
 the chart, and then checks that upgrading, uninstalling and reinstalling the chart leave the state
 alone.
+[test/e2e/kind-x509.sh](../test/e2e/kind-x509.sh) installs the chart with a certificate authority and
+tests X.509-SVIDs: two pods talk mTLS with identities from the cluster origin, a removed origin stops
+new certificates, and a CA rotation drops no connection.

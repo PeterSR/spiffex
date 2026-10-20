@@ -17,7 +17,7 @@ specification. Contributions that keep it that way are the most welcome kind.
 | `examples/` | complete settings files and states; a test validates them and the examples in `docs/` |
 | `deploy/kubernetes/` | example manifests for the issuer and a workload |
 | `charts/spiffex/` | the Helm chart for the issuer; `ci/` holds the value sets its tests render |
-| `test/e2e/` | the end-to-end tests on a kind cluster, with the manifests and with the chart |
+| `test/e2e/` | the end-to-end tests on a kind cluster, with the manifests and with the chart, and for X.509-SVIDs |
 | `scripts/` | release helpers |
 
 ## Development
@@ -55,7 +55,12 @@ the plain manifests and with the Helm chart (which also needs helm):
 ```bash
 test/e2e/kind.sh
 test/e2e/kind-helm.sh
+test/e2e/kind-x509.sh
 ```
+
+The last one tests X.509-SVIDs with a chart-installed issuer and takes about six minutes, most of it
+waiting for a CA rotation to reach the workloads. It uses a kubeconfig of its own and never touches
+yours.
 
 The `Makefile` has targets for all of this; `make help` lists them. `make test`, `make e2e` and
 `make e2e-helm` run in a PID namespace of their own, as above. `make lint` runs every linter CI
@@ -71,6 +76,41 @@ plain OAuth 2.0, with one audience and with two, against go-spiffe and py-spiffe
 an agent and against their own bundle sources, go-spiffe against the bundle endpoint, and PyJWT
 through OIDC discovery; for issuers signing with ES256 and with RS256, with more than one key
 published. Every verifier must also refuse each token for the wrong audience.
+
+The same holds for X.509-SVIDs. The matrix gets an X.509-SVID for the billing workload six ways:
+through go-spiffe and py-spiffe over the Workload API, through `spiffex token -x509` (all three a
+P-256 key made by the client), and by a CSR for a P-384, an Ed25519 and an RSA-2048 key, which only
+the issuer client can ask for (`conformance/goissue`). Each SVID must then be accepted by the
+verifiers, which read the identity themselves, from the certificate: go-spiffe chain verification
+(`x509svid.Verify`), a go-spiffe mTLS server that verifies it as a client certificate, a go-spiffe
+mTLS client that verifies it as a server certificate, and the same two with Python's `ssl` module
+(py-spiffe has no TLS helper and does not verify chains, so it supplies the SVID and the bundle and
+`ssl` does the verifying, strictly, and `client.py` checks that the one URI SAN is in the trust
+domain). The mTLS verifiers come in two forms. The first trusts the bundle an agent serves, that of
+trust domain A alone, so an SVID of a second issuer in trust domain B is refused because its chain
+does not verify. The `-ab` form is given the CAs of both trust domains and authorizes only trust
+domain A, so only the check of the SPIFFE ID can refuse the SVID of B; it is what shows that the check
+exists. Every verifier must refuse the same six kinds of SVID from the second issuer, and a server
+must log a refusal of its own, not a timeout or the client's alert. A server must also refuse a client
+that sends no certificate. Last, the matrix checks that each leaf has the key type it is supposed to
+and names the SPIFFE ID it is supposed to. All 54 pairs are accepted, all 54 pairs with the other
+trust domain's SVID are refused, and so are the four clients without a certificate:
+
+| Verifier | P-256 (go-spiffe, py-spiffe, `token -x509`) | P-384 | Ed25519 | RSA-2048 | SVID of trust domain B |
+|---|---|---|---|---|---|
+| go-spiffe `x509svid.Verify` | accepted | accepted | accepted | accepted | refused (chain) |
+| go-spiffe mTLS server (client certificate) | accepted | accepted | accepted | accepted | refused (chain) |
+| go-spiffe mTLS server, `-ab` | accepted | accepted | accepted | accepted | refused (trust domain) |
+| go-spiffe mTLS client (server certificate) | accepted | accepted | accepted | accepted | refused (chain) |
+| go-spiffe mTLS client, `-ab` | accepted | accepted | accepted | accepted | refused (trust domain) |
+| Python `ssl` server (client certificate) | accepted | accepted | accepted | accepted | refused (chain) |
+| Python `ssl` server, `-ab` | accepted | accepted | accepted | accepted | refused (trust domain) |
+| Python `ssl` client (server certificate) | accepted | accepted | accepted | accepted | refused (chain) |
+| Python `ssl` client, `-ab` | accepted | accepted | accepted | accepted | refused (trust domain) |
+
+Not covered: verifiers other than go-spiffe and OpenSSL through Python (rustls-webpki, BoringSSL and
+Java would exercise the name constraints of SPEC section 2.5 in other implementations), and a CA
+that is an intermediate under a root; the matrix uses a root made by `spiffex ca init`.
 
 That has two consequences for contributors:
 

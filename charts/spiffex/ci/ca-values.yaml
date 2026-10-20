@@ -1,0 +1,5 @@
+# A root the issuer holds itself: no ca_roots.
+trustDomain: example.org
+signingKeys: { existingSecret: keys }
+tls: { existingSecret: tls }
+ca: { existingSecret: ca }

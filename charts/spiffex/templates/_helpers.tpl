@@ -72,8 +72,25 @@ app.kubernetes.io/component: issuer
 {{- end }}
 {{- end }}
 
+{{/* The name of the object holding ca_roots, or nothing without roots. */}}
+{{- define "spiffex.caRoots" -}}
+{{- $roots := .Values.ca.roots }}
+{{- if and $roots.configMap $roots.secret }}
+{{- fail "ca.roots.configMap and ca.roots.secret are alternatives: set one" }}
+{{- end }}
+{{- if or $roots.configMap $roots.secret }}
+{{- if not .Values.ca.existingSecret }}
+{{- fail "ca.roots needs ca.existingSecret: roots only mean something to the CA in ca_dir" }}
+{{- end }}
+{{- default $roots.secret $roots.configMap }}
+{{- else if .Values.ca.rootsDedicated }}
+{{- fail "ca.rootsDedicated says the roots are dedicated to the trust domain, and ca.roots names none" }}
+{{- end }}
+{{- end }}
+
 {{/* The issuer's settings file. */}}
 {{- define "spiffex.settings" -}}
+{{- $caRoots := include "spiffex.caRoots" . -}}
 issuer: {{ include "spiffex.issuer" . | quote }}
 trust_domain: {{ required "trustDomain is required" .Values.trustDomain | quote }}
 keys_dir: /keys
@@ -83,6 +100,16 @@ state:
   configmap:
     namespace: {{ .Release.Namespace | quote }}
     name: {{ include "spiffex.stateConfigMap" . | quote }}
+{{- with .Values.x509SVIDTTL }}
+x509_svid_ttl: {{ . | quote }}
+{{- end }}
+{{- if .Values.ca.existingSecret }}
+ca_dir: /ca
+{{- if $caRoots }}
+ca_roots: {{ printf "/ca-roots/%s" .Values.ca.roots.key | quote }}
+ca_roots_dedicated: {{ .Values.ca.rootsDedicated }}
+{{- end }}
+{{- end }}
 management: {{ .Values.management }}
 fetch:
   refuse_private_addresses: {{ .Values.fetch.refusePrivateAddresses }}

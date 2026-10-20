@@ -62,6 +62,22 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retired. Against an issuer without a CA the X.509 calls answer `Unimplemented`; the agent rereads the
   discovery flag at each bundle refresh. `FetchJWTBundles` no longer repeats an unchanged bundle when
   only the X.509 roots changed.
+- The conformance matrix covers X.509-SVIDs. SVIDs obtained through go-spiffe, py-spiffe,
+  `spiffex token -x509` and, for P-384, Ed25519 and RSA-2048 keys, a new `conformance/goissue`
+  command are accepted by go-spiffe chain verification and by mTLS handshakes with go-spiffe and with
+  Python's `ssl` module, in both directions. Every verifier refuses the SVID of an issuer in another
+  trust domain, by chain verification and, for verifiers given both CAs, by the check of the SPIFFE
+  ID alone, and servers refuse a client that sends no certificate.
+- `test/e2e/kind-x509.sh` (`make e2e-x509`) tests X.509-SVIDs on a kind cluster with the chart: two
+  pods talk mTLS with identities from the cluster origin, a pod with the wrong audience gets none, a
+  removed origin stops new certificates, and a CA rotation drops no connection and moves new
+  connections to the new CA.
+- The Helm chart takes a certificate authority. `ca.existingSecret` is mounted at `ca_dir` with mode
+  0440 like the signing keys, `ca.roots.configMap` or `ca.roots.secret` (with `ca.roots.key`)
+  supplies `ca_roots`, `ca.rootsDedicated` sets `ca_roots_dedicated`, and `x509SVIDTTL` sets
+  `x509_svid_ttl`. The chart refuses roots without a CA, both kinds of roots, and
+  `readableFiles` under `/ca` or `/ca-roots`. Rotating the CA is replacing the Secret; the issuer
+  takes it up without a restart.
 - `POST /manage/check` reports `x509_under_restriction`: the origins that list `x509` under an
   audience restriction, which does not cover their X.509-SVIDs.
 

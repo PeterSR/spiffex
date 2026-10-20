@@ -32,6 +32,10 @@ e2e: ## Run the end-to-end test on kind with the plain manifests.
 e2e-helm: ## Run the end-to-end test on kind with the Helm chart.
 	$(SANDBOX) test/e2e/kind-helm.sh
 
+.PHONY: e2e-x509
+e2e-x509: ## Run the end-to-end test of X.509-SVIDs on kind with the Helm chart (about six minutes).
+	$(SANDBOX) test/e2e/kind-x509.sh
+
 .PHONY: fmt
 fmt: ## gofmt the tree.
 	gofmt -w .

@@ -1,7 +1,8 @@
 # spiffex Helm chart
 
 Deploys the [spiffex](https://github.com/PeterSR/spiffex) issuer: an OAuth 2.0 token endpoint that
-issues SPIFFE JWT-SVIDs, with its state in a ConfigMap and its settings built from values. It
+issues SPIFFE JWT-SVIDs and, with a certificate authority ([below](#the-certificate-authority)),
+X.509-SVIDs, with its state in a ConfigMap and its settings built from values. It
 deploys what [deploy/kubernetes/issuer.yaml](../../deploy/kubernetes/issuer.yaml) does, with the
 same hardening: a non-root, read-only container without capabilities, the signing keys and TLS key
 mounted with mode `0440` for the pod's `fsGroup` alone, and a Role that lets the issuer get (and,
@@ -194,6 +195,65 @@ and the issuer takes it up and publishes it for the activation delay before it s
 parameter only when the pruning rule in
 [docs/configuration.md](../../docs/configuration.md#rotating-signing-keys) allows removing that key.
 
+## The certificate authority
+
+Without `ca.existingSecret` the issuer issues JWT-SVIDs only. To have it issue X.509-SVIDs too, give
+it a certificate authority (the settings `ca_dir`, `ca_roots`, `ca_roots_dedicated` and
+`x509_svid_ttl`, described with their rules in
+[docs/configuration.md](../../docs/configuration.md#the-certificate-authority)). Like the signing
+keys, the CA's files are made outside the chart and the chart never generates them. A root the
+issuer holds itself:
+
+```bash
+mkdir ca && spiffex ca init -dir ca -trust-domain example.org
+kubectl -n spiffex create secret generic spiffex-ca --from-file=ca
+```
+
+```yaml
+ca:
+  existingSecret: spiffex-ca
+```
+
+The Secret is mounted at the issuer's `ca_dir`, `/ca`, with `defaultMode: 0440` for the pod's
+`fsGroup`, as the signing keys are, and one Secret key is one file: `ca-<time>.crt` and
+`ca-<time>.key`. The directory is separate from the signing keys' on purpose, so that a mistake in
+one Secret does not expose both kinds of key. Protect the local `ca` directory like the Secret, or
+delete it.
+
+An intermediate under a root you keep elsewhere is made with `spiffex ca csr` and `spiffex ca
+import`, which write the same files, and the root certificates go in a ConfigMap (they are public)
+or a Secret, named by `ca.roots`:
+
+```bash
+kubectl -n spiffex create configmap spiffex-ca-roots --from-file=ca-roots.pem=roots.pem
+```
+
+```yaml
+ca:
+  existingSecret: spiffex-ca
+  roots:
+    configMap: spiffex-ca-roots   # or secret: <name>
+    key: ca-roots.pem             # the key of the file in it, the default
+  rootsDedicated: false           # true only as docs/configuration.md describes
+x509SVIDTTL: 1h
+```
+
+The chart refuses `ca.roots` or `ca.rootsDedicated` without `ca.existingSecret`, and both kinds of
+roots at once. A missing ConfigMap, Secret or key keeps the pod from starting, which is the point.
+
+**Rotation does not restart the issuer.** The issuer rereads `ca_dir` and `ca_roots` every
+`reloadInterval`, and the kubelet updates a mounted Secret or ConfigMap within about a minute (not
+a `subPath` mount, which the chart does not use). Replace the Secret as a whole, with the new CA's
+files added next to the old ones, then follow the rotation rules in
+[docs/configuration.md](../../docs/configuration.md#the-certificate-authority): the new CA is
+published for `activationDelay` before the issuer signs with it, and an old one is removed only
+when `spiffex ca prune` allows. Changing `x509SVIDTTL`, `ca.rootsDedicated` or which roots object
+is used changes the settings and so restarts the issuer.
+
+Workloads reach the CA through their agent, which serves the X.509-SVID and the bundle on the
+Workload API as it does JWT-SVIDs; the agent is not part of the chart. An origin issues X.509-SVIDs
+unless its `svid_types` leaves them out.
+
 ## The state ConfigMap
 
 The state (origins, providers and grants) is in a ConfigMap, `<fullname>-state` by default, under
@@ -255,13 +315,14 @@ Flux's helm-controller runs real installs and upgrades, where the lookup works a
 | `issuer` | `""` | The issuer URL. Empty: `https://<fullname>.<namespace>.svc`, which needs TLS. Required without TLS. |
 | `trustDomain` | `""` | The trust domain (required). |
 | `tokenTTL` | `5m` | Lifetime of issued JWT-SVIDs, at most `1h`. |
-| `activationDelay` | `30m` | How long a new signing key is published before it signs. |
+| `x509SVIDTTL` | unset | Lifetime of issued X.509-SVIDs, `10m` to `24h`. Unset keeps the issuer's default, `1h`. |
+| `activationDelay` | `30m` | How long a new signing key or CA is published before it signs. |
 | `management` | `true` | Serve the management API at `<issuer>/manage`. Off, the issuer may only get its state ConfigMap. |
 | `reloadInterval` | `10s` | How often the issuer checks the state and the signing keys for changes. |
 | `logLevel` | `info` | `debug`, `info`, `warn` or `error`. |
 | `fetch.refusePrivateAddresses` | `true` | Refuse key fetches to non-public addresses. |
 | `fetch.allowPrivateHosts` | `[kubernetes.default.svc.cluster.local:443]` | `host:port` pairs exempt from that; the default is the in-cluster API server. |
-| `readableFiles` | unset | `readable_files` of the settings; unset keeps the issuer's default. |
+| `readableFiles` | unset | `readable_files` of the settings; unset keeps the issuer's default. The schema refuses paths that start with `/keys`, `/tls`, `/config`, `/ca` or `/ca-roots`, by name only: it does not see through `..` or symlinks, so it guards against mistakes, not against an operator. |
 | `bearerTokenFiles` | unset | `bearer_token_files`, as `{path, hosts, paths}`; unset keeps the default. |
 | `verifiers` | unset | Installed exec verifiers, each a list of an absolute path and fixed arguments. Mount them with `extraVolumes`. |
 | `verifierLimits` | unset | `{perOrigin, total, perAddressPerMinute, perAddressBurst}`. |
@@ -276,6 +337,10 @@ Flux's helm-controller runs real installs and upgrades, where the lookup works a
 | `state.content` | `{}` | The state written on install, and never again. Empty admits nobody. |
 | `state.configMapAnnotations` | `{}` | Further annotations on the state ConfigMap the chart creates. `helm.sh/resource-policy: keep` is always set, and `Prune=false,Delete=false` is added to any `argocd.argoproj.io/sync-options` given. |
 | `signingKeys.existingSecret` | `""` | The Secret with the signing keys (required). |
+| `ca.existingSecret` | `""` | The Secret with the CA's files, mounted at `ca_dir`. Empty: no CA, JWT-SVIDs only. See [The certificate authority](#the-certificate-authority). |
+| `ca.roots.configMap`, `ca.roots.secret` | `""` | The object holding the root certificates of your own CA (`ca_roots`); one of them, and only with `ca.existingSecret`. |
+| `ca.roots.key` | `ca-roots.pem` | The key of the roots file in that object. |
+| `ca.rootsDedicated` | `false` | `ca_roots_dedicated`: every CA those roots certify is this issuer's. Needs `ca.roots`. |
 | `tls.existingSecret` | `""` | A TLS Secret for the issuer. |
 | `tls.certManager.enabled` | `false` | Make a cert-manager `Certificate` instead. |
 | `tls.certManager.issuerRef` | `{name: "", kind: Issuer, group: cert-manager.io}` | The cert-manager issuer; `name` is required when enabled. |
