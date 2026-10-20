@@ -524,8 +524,10 @@ An origin has:
 
 An origin's **kind** is that of its provider's proof: `jwt`, `keys` or `exec`.
 
-Origin names, prefixes, and the upstream issuer and audience of `jwt` origins are not secret: the
-management API reveals them in conflicts (section 8.3). Providers are readable by every identity in
+Origin names, prefixes, the shape of X.509 common names (section 4.6), and the upstream issuer and
+audience of `jwt` origins are not secret from a caller who may write origins: the management API
+reveals them in conflicts (section 8.3), and trial writes can probe how the common names of an
+origin the caller may not read begin. Providers are readable by every identity in
 the trust domain, so a provider, an `exec` verifier's command included, is not secret either.
 
 ### 4.1 Naming: prefix and name template
@@ -691,8 +693,10 @@ starts with `/` is invalid, and so is one whose names can start with `/`, such a
 `{path|trim_suffix:...}`, or a trim of the prefix that leaves the `/` (`trim_prefix:/tenants`). Trim
 it away (`{path|trim_prefix:/}`), trim more, or start with text (`pg:{path}`). The issuer MUST also
 refuse, as below, a name that would start with `/`. The default name, the full `spiffe://...` ID,
-does not start with `/`. A hand-written `pg_ident.conf` line that does start with `/` MUST be
-anchored (`^...$`) to match only itself.
+does not start with `/`. Operators SHOULD NOT write regular expression lines for these names: each
+name is mapped with a plain quoted entry that does not start with `/`. If a regular expression is
+unavoidable it MUST be anchored and escape every regular expression metacharacter, `.` included,
+which a path segment may hold: `^` and `$` alone are not enough.
 
 The common name is the template filled in, and MUST be 1 to 64 characters, the upper bound of
 [RFC 5280]. When an operation does not apply to the identity, leaves nothing, or the result exceeds
