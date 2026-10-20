@@ -66,6 +66,9 @@ type fakeX509Issuer struct {
 	// bundleHook runs in the bundle endpoint after it has chosen what to
 	// serve.
 	bundleHook atomic.Pointer[func()]
+	// withoutJWT serves a bundle with no JWT authority, as an issuer whose
+	// JWT keys were all removed does.
+	withoutJWT atomic.Bool
 
 	mu       sync.Mutex
 	roots    []fakeRoot // published
@@ -168,7 +171,9 @@ func (f *fakeX509Issuer) serveBundle(w http.ResponseWriter, _ *http.Request) {
 		f.t.Error(err)
 	}
 	b := spiffebundle.New(td)
-	b.AddJWTAuthority("k1", jwtKey.Public())
+	if !f.withoutJWT.Load() {
+		b.AddJWTAuthority("k1", jwtKey.Public())
+	}
 	b.SetX509Authorities(f.rootCerts())
 	if hook := f.bundleHook.Load(); hook != nil {
 		(*hook)()
@@ -1322,5 +1327,55 @@ func TestFlappingBundleCostsFewIssuances(t *testing.T) {
 	// A one hour lifetime has a floor of 30 s, longer than the flips take: nothing more is issued.
 	if n := fake.issuedCount("workloads/billing"); n != 1 {
 		t.Errorf("%d certificates for 40 bundle changes, want 1 within the floor", n)
+	}
+}
+
+// An issuer with a CA and no JWT key works for X.509: the agent takes its
+// bundle, issues an X.509-SVID, and tells an open FetchJWTBundles stream that
+// the last JWT key is gone, since removing a key is how it is revoked. A key
+// coming back is streamed again.
+func TestAgentFollowsAnIssuerWithoutJWTKeys(t *testing.T) {
+	t.Parallel()
+	fake := newFakeX509Issuer(t, 30*time.Second)
+	rig := newX509Rig(t, fake, "workloads/billing")
+	header := metadata.AppendToOutgoingContext(rig.ctx, "workload.spiffe.io", "true")
+	api := workload.NewSpiffeWorkloadAPIClient(rig.conn)
+
+	jwtBundles, err := api.FetchJWTBundles(header, &workload.JWTBundlesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keysIn := func() int {
+		t.Helper()
+		resp, err := jwtBundles.Recv()
+		if err != nil {
+			t.Fatalf("FetchJWTBundles: %v", err)
+		}
+		var jwks struct {
+			Keys []json.RawMessage `json:"keys"`
+		}
+		if err := json.Unmarshal(resp.Bundles["spiffe://example.org"], &jwks); err != nil {
+			t.Fatal(err)
+		}
+		return len(jwks.Keys)
+	}
+	if n := keysIn(); n != 1 {
+		t.Fatalf("first JWT bundle has %d keys, want 1", n)
+	}
+
+	fake.withoutJWT.Store(true)
+	rig.agent.refreshBundle(rig.ctx)
+	if n := keysIn(); n != 0 {
+		t.Errorf("JWT bundle after the last key was removed has %d keys, want 0", n)
+	}
+	if b, _ := rig.agent.currentBundle(); len(b.JWTAuthorities()) != 0 || len(b.X509Authorities()) == 0 {
+		t.Errorf("the agent's bundle has %d JWT and %d X.509 authorities", len(b.JWTAuthorities()), len(b.X509Authorities()))
+	}
+	parsed(t, rig.openSVID(t).mustRecv(5*time.Second))
+
+	fake.withoutJWT.Store(false)
+	rig.agent.refreshBundle(rig.ctx)
+	if n := keysIn(); n != 1 {
+		t.Errorf("JWT bundle after a key came back has %d keys, want 1", n)
 	}
 }

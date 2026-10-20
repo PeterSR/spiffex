@@ -69,7 +69,15 @@ func runIssuer(ctx context.Context, args []string) error {
 	if err := pol.Apply(snap); err != nil {
 		return fmt.Errorf("the state in %s is invalid:\n%w", stateStore, err)
 	}
-	keys, err := keyset.NewWatcher(s.KeysDir, logger)
+	// With a CA the issuer still has anchors to publish, so a keys_dir with no
+	// key is a state it can start in, as a ca_dir with no CA key is. Without
+	// a CA it would publish and sign nothing, and fails.
+	var keys *keyset.Watcher
+	if s.CADir != "" {
+		keys, err = keyset.NewWatcherAllowingNoKeys(s.KeysDir, logger)
+	} else {
+		keys, err = keyset.NewWatcher(s.KeysDir, logger)
+	}
 	if err != nil {
 		return fmt.Errorf("signing keys: %w", err)
 	}

@@ -323,3 +323,152 @@ func TestWatcherChecksNewKeys(t *testing.T) {
 		t.Error("a key added back that passes its check was not taken up")
 	}
 }
+
+// Removing the last key file takes the issuer out of signing, the same rule
+// as a CA whose key was removed: the set becomes empty, publishes nothing and
+// signs nothing, and a key that comes back signs again.
+func TestRemovingTheLastKeyStopsSigning(t *testing.T) {
+	dir := t.TempDir()
+	only, err := Add(dir, ES256, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	c := &clock{t0.Add(48 * time.Hour)}
+	w, err := newWatcher(dir, slog.New(slog.NewTextHandler(&logs, nil)), c.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, seq, changed := w.Current()
+	if err := os.Remove(filepath.Join(dir, only.File)); err != nil {
+		t.Fatal(err)
+	}
+	if w.Reload() {
+		t.Fatal("the first poll with no key file emptied the set")
+	}
+	if set, _, _ := w.Current(); set.Empty() {
+		t.Fatal("the set is empty after one poll")
+	}
+	if !strings.Contains(logs.String(), "no JWT key file seen; stopping JWT signing if the next poll agrees") {
+		t.Errorf("the first empty poll was not warned about: %s", logs.String())
+	}
+	if !w.Reload() {
+		t.Fatal("Reload missed the removal of the last key")
+	}
+	set, seq2, _ := w.Current()
+	select {
+	case <-changed:
+	default:
+		t.Error("changed not closed")
+	}
+	if !set.Empty() || len(set.Keys()) != 0 || len(set.IDs()) != 0 || seq2 <= seq {
+		t.Errorf("after removing the last key: %d keys, sequence %d (was %d)", len(set.Keys()), seq2, seq)
+	}
+	if _, ok := set.Active(c.t, time.Hour); ok {
+		t.Error("an empty set has an active key")
+	}
+	if got := set.Retired(c.t, time.Hour, time.Hour); len(got) != 0 {
+		t.Errorf("an empty set retired %d keys", len(got))
+	}
+	if !strings.Contains(logs.String(), "no signing key is left") {
+		t.Errorf("the empty set was not logged: %s", logs.String())
+	}
+	if w.Reload() {
+		t.Error("a second reload of the empty directory reported a change")
+	}
+
+	c.t = c.t.Add(time.Minute)
+	back, err := Add(dir, ES256, c.t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !w.Reload() {
+		t.Fatal("Reload missed a key added to an empty set")
+	}
+	set, seq3, _ := w.Current()
+	got, ok := set.Active(c.t, time.Hour)
+	if !ok || got.ID != back.ID || seq3 <= seq2 {
+		t.Errorf("after adding a key back: active %v (%v), sequence %d (was %d)", got.ID, ok, seq3, seq2)
+	}
+}
+
+// A directory with no key at startup fails, unless the issuer has X.509
+// anchors to publish: then it starts without signing and picks up the first
+// key that appears.
+func TestStartingWithoutKeys(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := NewWatcher(dir, quietLogger()); !errors.Is(err, ErrNoKeys) {
+		t.Fatalf("NewWatcher on an empty directory: %v, want ErrNoKeys", err)
+	}
+	if _, err := NewWatcherAllowingNoKeys(filepath.Join(dir, "missing"), quietLogger()); err == nil || errors.Is(err, ErrNoKeys) {
+		t.Errorf("a missing directory: %v, want a plain error", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, FileName(t0)), []byte("not a key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewWatcherAllowingNoKeys(dir, quietLogger()); err == nil || errors.Is(err, ErrNoKeys) {
+		t.Errorf("an unparsable key file: %v, want a plain error", err)
+	}
+	if err := os.Remove(filepath.Join(dir, FileName(t0))); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	w, err := NewWatcherAllowingNoKeys(dir, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, seq, _ := w.Current()
+	if !set.Empty() || seq == 0 {
+		t.Errorf("started with %d keys, sequence %d", len(set.Keys()), seq)
+	}
+	if !strings.Contains(logs.String(), "no signing key") {
+		t.Errorf("the empty start was not logged: %s", logs.String())
+	}
+	if _, err := Add(dir, ES256, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !w.Reload() {
+		t.Fatal("Reload missed the first key")
+	}
+	if set, _, _ := w.Current(); len(set.Keys()) != 1 {
+		t.Errorf("%d keys after the first was added", len(set.Keys()))
+	}
+}
+
+// A key file renamed away and back, as some editors save, or a volume that
+// remounts, shows an empty directory for one poll. That is no removal.
+func TestOneEmptyPollIsNotARemoval(t *testing.T) {
+	dir := t.TempDir()
+	k, err := Add(dir, ES256, time.Now().Add(-48*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewWatcher(dir, quietLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	set0, seq0, _ := w.Current()
+	path := filepath.Join(dir, k.File)
+	for range 3 {
+		if err := os.Rename(path, path+"~"); err != nil {
+			t.Fatal(err)
+		}
+		if w.Reload() {
+			t.Fatal("one empty poll changed the published keys")
+		}
+		if err := os.Rename(path+"~", path); err != nil {
+			t.Fatal(err)
+		}
+		if w.Reload() {
+			t.Fatal("the key coming back changed the published keys")
+		}
+	}
+	set, seq, _ := w.Current()
+	if seq != seq0 || !slices.Equal(set.IDs(), set0.IDs()) {
+		t.Errorf("sequence %d -> %d, keys %v -> %v", seq0, seq, set0.IDs(), set.IDs())
+	}
+	if _, ok := set.Active(time.Now(), time.Hour); !ok {
+		t.Error("the key stopped signing")
+	}
+}

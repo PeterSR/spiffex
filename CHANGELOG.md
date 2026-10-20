@@ -7,6 +7,24 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Removing the last JWT signing key from `keys_dir` stops the issuer signing JWT-SVIDs, as removing
+  the key of the last CA stops X.509-SVIDs. Until now the running issuer kept the removed key and went on
+  signing. The issuer keeps running: the token endpoint answers a request for a JWT-SVID with
+  `invalid_request`, the JWKS and the bundle publish no JWT key, discovery lists no signing
+  algorithm of its own (it lists ES256 and RS256), the management API admits nobody, and X.509-SVIDs are unaffected. A key added later
+  signs at once. The removal is confirmed by a second poll that also sees no key file. An issuer with a `ca_dir` also starts with an empty `keys_dir` (and logs an error);
+  without a CA it still refuses to start.
+- The agent, and so `spiffex token -x509`, accepts a bundle that has X.509 authorities and no JWT
+  authority, and tells open `FetchJWTBundles` streams when the last JWT key is gone. A bundle with
+  no authority at all (every key and CA file deleted) is served with `"keys": []`, and the agent
+  takes it too. The agent forgets the cached JWT-SVIDs whose signing key has left the bundle, so
+  a removed key stops being handed out to workloads as well.
+- A self-signed certificate without a key that appears in `ca_dir` while the issuer runs, with the
+  subject of a CA in service (also one whose files turned bad) and another key, no longer displaces that CA: it is logged and not
+  published, as a self-signed CA with a key already was.
+
 ### Added
 
 - The specification describes X.509-SVIDs: a certificate authority next to the JWT signing keys

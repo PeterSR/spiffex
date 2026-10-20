@@ -1,6 +1,7 @@
 package ca
 
 import (
+	"bytes"
 	"crypto/x509"
 	"os"
 	"path/filepath"
@@ -338,6 +339,133 @@ func TestSelfSignedNewcomerDoesNotDisplaceTheCAInService(t *testing.T) {
 			}
 			if len(set.Anchors()) != 1 {
 				t.Errorf("%d anchors, want the incumbent's alone", len(set.Anchors()))
+			}
+		})
+	}
+}
+
+// A keyless self-signed certificate with the subject of the CA in service is
+// refused like a self-signed CA with a key: the incumbent keeps its subject,
+// one anchor stays published, and the refusal is logged once. The same files
+// are refused loudly at startup, where nothing is in service yet.
+func TestKeylessSelfSignedNewcomerDoesNotDisplaceTheCAInService(t *testing.T) {
+	for _, kind := range []string{"root incumbent", "intermediate incumbent"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			opts := testOptions(dir)
+			var incumbent CA
+			if kind == "root incumbent" {
+				incumbent = initRoot(t, dir, t0)
+			} else {
+				roots := filepath.Join(t.TempDir(), "roots.pem")
+				root, rootKey := operatorRoot(t, t0, true)
+				writeRoots(t, roots, t0, root)
+				opts.Roots = roots
+				incumbent = newIntermediate(t, opts, t0.Add(time.Hour), root, rootKey, nil)
+			}
+			c := &clock{t0.Add(5 * time.Hour)}
+			logger, logs := capturedLogger()
+			w, err := newWatcher(opts, logger, c.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			k := key(t)
+			created := t0.Add(4 * time.Hour)
+			newcomer := issue(t, profileTemplate(t, k.Public(), "x", created, func(x *x509.Certificate) {
+				x.RawSubject = incumbent.Cert.RawSubject
+			}), k.Public(), nil, k)
+			install(t, dir, created, nil, newcomer)
+			for range 3 {
+				c.t = c.t.Add(time.Minute)
+				w.Reload()
+			}
+			set, _, _ := w.Current()
+			if cas := set.CAs(); len(cas) != 1 || cas[0].File != incumbent.File {
+				t.Errorf("%d CAs in service, want only the incumbent; log:\n%s", len(cas), logs.String())
+			}
+			if _, err := set.Select(c.t, svidTTL); err != nil {
+				t.Errorf("the incumbent stopped signing: %v", err)
+			}
+			for _, a := range set.Anchors() {
+				if a.Cert.Equal(newcomer) {
+					t.Error("the newcomer is published")
+				}
+			}
+			if len(set.Anchors()) != 1 {
+				t.Errorf("%d anchors, want the incumbent's alone", len(set.Anchors()))
+			}
+			if n := strings.Count(logs.String(), "not using a CA certificate"); n != 1 {
+				t.Errorf("the refusal was logged %d times, want once; log:\n%s", n, logs.String())
+			}
+			if _, err := Load(opts, c.t); err == nil {
+				t.Error("a restart with both certificates in ca_dir started")
+			}
+		})
+	}
+}
+
+// The CA in service keeps its subject against a keyless self-signed
+// newcomer also when its own files have turned bad and it is only carried,
+// whether the newcomer comes in a later reload or in the same one.
+func TestCarriedIncumbentKeepsItsSubjectAgainstAKeylessNewcomer(t *testing.T) {
+	for _, mode := range []string{"bad, then newcomer", "both in one reload"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			opts := testOptions(dir)
+			incumbent := initRoot(t, dir, t0)
+			c := &clock{t0.Add(5 * time.Hour)}
+			logger, logs := capturedLogger()
+			w, err := newWatcher(opts, logger, c.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := os.ReadFile(filepath.Join(dir, incumbent.File))
+			if err != nil {
+				t.Fatal(err)
+			}
+			corrupt := func() {
+				if err := os.WriteFile(filepath.Join(dir, incumbent.File), []byte("-----BEGIN CERTIFICATE-----\ngarbage\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			k := key(t)
+			created := t0.Add(4 * time.Hour)
+			newcomer := func() {
+				n := issue(t, profileTemplate(t, k.Public(), "x", created, func(x *x509.Certificate) {
+					x.RawSubject = incumbent.Cert.RawSubject
+				}), k.Public(), nil, k)
+				install(t, dir, created, nil, n)
+			}
+			corrupt()
+			if mode == "bad, then newcomer" {
+				c.t = c.t.Add(time.Minute)
+				w.Reload()
+			}
+			newcomer()
+			c.t = c.t.Add(time.Minute)
+			w.Reload()
+			set, _, _ := w.Current()
+			sameSubject := func() int {
+				n := 0
+				for _, a := range set.Anchors() {
+					if bytes.Equal(a.Cert.RawSubject, incumbent.Cert.RawSubject) {
+						n++
+					}
+				}
+				return n
+			}
+			if sameSubject() != 1 {
+				t.Errorf("%d anchors with the incumbent's subject; log:\n%s", sameSubject(), logs.String())
+			}
+			if err := os.WriteFile(filepath.Join(dir, incumbent.File), original, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			c.t = c.t.Add(time.Minute)
+			w.Reload()
+			set, _, _ = w.Current()
+			signer, err := set.Select(c.t, svidTTL)
+			if err != nil || signer.CA.File != incumbent.File || sameSubject() != 1 {
+				t.Errorf("after the repair: signer %v, err %v, %d anchors with the subject", signer.CA.File, err, sameSubject())
 			}
 		})
 	}

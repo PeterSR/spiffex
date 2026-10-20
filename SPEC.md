@@ -77,7 +77,7 @@ well-known segment inserted after the host when it has one
 | `grant_types_supported` | `client_credentials` and `urn:ietf:params:oauth:grant-type:token-exchange` |
 | `token_endpoint_auth_methods_supported` | `["private_key_jwt", "none"]` |
 | `token_endpoint_auth_signing_alg_values_supported` | algorithms accepted on client assertions |
-| `id_token_signing_alg_values_supported` | algorithms the issuer signs with |
+| `id_token_signing_alg_values_supported` | algorithms of the keys the issuer publishes; `ES256` and `RS256`, the ones it can sign with, when it has no key (section 2.4), because relying parties read the field once and keep it |
 | `response_types_supported` | `["id_token"]`, for consumers that require the field |
 | `subject_types_supported` | `["public"]` |
 | `claims_supported` | `["iss", "sub", "aud", "exp", "iat", "jti"]` |
@@ -95,7 +95,8 @@ MUST NOT take them from this document.
 `GET <issuer>/jwks` returns a JSON Web Key Set ([RFC 7517]) holding every key the issuer publishes:
 keys it signs with now, keys it will sign with after activation, and keys that signed tokens that
 may still be valid (section 2.4). Each key carries `kid`, `alg` and `use: "sig"`. This is the
-endpoint for OIDC consumers: cloud federation, API gateways, generic JWT libraries.
+endpoint for OIDC consumers: cloud federation, API gateways, generic JWT libraries. An issuer with no
+signing key (section 2.4) serves an empty key set (`"keys": []`).
 
 ### 2.3 SPIFFE bundle
 
@@ -103,7 +104,11 @@ endpoint for OIDC consumers: cloud federation, API gateways, generic JWT librari
 Bundle] standard: the same public keys as the JWKS, each with `use: "jwt-svid"` and `kid`, and, when
 the issuer has a certificate authority, each anchor (section 2.5) as a key with `use: "x509-svid"`,
 the certificate's public key parameters (`kty` and its key members) and the certificate in `x5c`,
-one element, the certificate itself. It also carries `spiffe_sequence` and `spiffe_refresh_hint`
+one element, the certificate itself. An issuer with no signing key publishes no `jwt-svid` keys, and
+one with no certificate authority no `x509-svid` keys. At startup an issuer needs one of the two, but
+a running one can lose both, when every key and CA file is deleted: its bundle then has an empty
+`keys` array (never `null`), which a consumer MUST read as a trust domain with no authority and not
+as an error. It also carries `spiffe_sequence` and `spiffe_refresh_hint`
 (seconds). It is a bundle endpoint with the `https_web` profile of
 [SPIFFE Federation]. The JWKS (section 2.2) never contains X.509 authorities: OIDC consumers have no
 use for them.
@@ -133,7 +138,21 @@ newest. When none has, as in a newly created trust domain, it signs with the key
 had it been running all along, or else with the oldest key.
 
 A compromised key is the exception to rule 2: the operator removes it at once, accepting that tokens
-it signed stop verifying.
+it signed stop verifying. This holds for the last key too. When the keys directory is left with no
+key file at all for two polls in a row (one poll only warns, so that a file renamed away and back, or a
+volume remounting, is no removal), the issuer goes on running but signs no JWT-SVID: the token endpoint answers a request
+for one with `invalid_request` (section 3.1), as it does for an X.509-SVID when no CA is left. The
+JWKS and the bundle publish no JWT key, discovery lists the algorithms the issuer can sign with, the X.509 side is
+unaffected, and the management API admits nobody, since it can neither mint nor verify a management
+token (section 8.1); the state in storage is still changed through its files. A key added later is
+published and signs as in the rules above; with no other key it signs at once, as in a newly created
+trust domain. A key that exists but may not sign, because it is exposed (section 5.4), is not this
+case: it stays published and the token endpoint answers `server_error`.
+
+At startup an issuer needs something to publish. With no key in the keys directory it starts only
+if it has a certificate authority (section 2.5), whose anchors it then publishes, and logs an error;
+without a certificate authority it refuses to start. This mirrors the certificate authority, which
+starts with no CA that can sign if anchors remain and refuses to start with none.
 
 Signing keys are not part of the state (section 6) and the management API cannot read or change
 them. The same holds for the certificate authority's keys and certificates (section 2.5).
@@ -299,7 +318,7 @@ Errors follow [RFC 6749] section 5.2: a JSON body with `error` and optionally `e
 
 | Situation | `error` | Status |
 |---|---|---|
-| Malformed request: wrong content type, missing or repeated parameter (`grant_type` included), wrong `client_assertion_type`, bad audience value, oversized body; an `audience` with an X.509-SVID request, a missing `csr` with one, a `csr` with a JWT-SVID request; a `requested_token_type` that is neither of the two; an X.509-SVID requested from an issuer without a certificate authority, or whose certificate authority has no CA left with a key | `invalid_request` | 400 |
+| Malformed request: wrong content type, missing or repeated parameter (`grant_type` included), wrong `client_assertion_type`, bad audience value, oversized body; an `audience` with an X.509-SVID request, a missing `csr` with one, a `csr` with a JWT-SVID request; a `requested_token_type` that is neither of the two; an X.509-SVID requested from an issuer without a certificate authority, or whose certificate authority has no CA left with a key; a JWT-SVID requested from an issuer whose keys directory holds no key (section 2.4) | `invalid_request` | 400 |
 | A `grant_type` other than the two above | `unsupported_grant_type` | 400 |
 | Client credentials: any failure to authenticate the client with a well-formed assertion | `invalid_client` | 401 |
 | Token exchange: the subject token is invalid, or its origin does not admit it | `invalid_request` | 400 |
@@ -312,7 +331,7 @@ The issuer MUST finish authenticating the caller before it returns `invalid_targ
 does not reveal what a given client or token would be permitted. The same holds for the contents of
 a `csr`: a request with a bad `csr` and a bad proof is answered as a bad proof. Whether a `csr` is
 present is a property of the request and is answered first, like a missing audience, and so is whether
-the issuer has a certificate authority at all. After
+the issuer has a certificate authority at all, or any signing key. After
 authentication the issuer checks the origin's `svid_types` (section 4.5) before the audience
 restriction (section 4.4) and before the contents of the `csr`. A request refused for its origin's
 `svid_types` or for the contents of its `csr` has already consumed the assertion's `jti`
@@ -1177,7 +1196,7 @@ library as above; one whose list lacks `jwt` gets `PermissionDenied` from `Fetch
 | RPC | Behaviour |
 |---|---|
 | `FetchJWTSVID` | Returns a JWT-SVID for the requested audiences, obtained from the token endpoint. If `spiffe_id` is set and differs from the workload's identity, fails with `PermissionDenied`. |
-| `FetchJWTBundles` | Streams the trust domain's JWT bundle, keyed by the trust domain's SPIFFE ID (`spiffe://example.org`), and sends an update whenever the key set changes. Each key carries `kid` and `use: "jwt-svid"`. A bundle without keys is never sent: the agent keeps the last good bundle, and until it has one the stream waits. |
+| `FetchJWTBundles` | Streams the trust domain's JWT bundle, keyed by the trust domain's SPIFFE ID (`spiffe://example.org`), and sends an update whenever the key set changes. Each key carries `kid` and `use: "jwt-svid"`. Until the agent has fetched a bundle the stream waits; after that it sends what the bundle holds, which is an empty set once the issuer has no signing key (section 2.4), since removing a key is how it is revoked. A bundle fetch that fails changes nothing. The agent takes a bundle with only X.509 authorities, as an issuer with a CA and no JWT key serves. |
 | `ValidateJWTSVID` | Validates the token against the bundle and the given audience, and returns its SPIFFE ID and all of its claims. |
 | `FetchX509SVID` | Streams the workload's X.509-SVID: the certificate chain, the private key (PKCS#8 DER) and the trust domain's X.509 bundle, as the standard shapes them. The agent holds one current X.509-SVID for the workload and sends it to every open stream. It generates a new P-256 key for each SVID, and obtains a new SVID when the current one has lived between 40 and 50 percent of its lifetime (random within that window), measured from the certificate's `notBefore` and `notAfter`. It retries with backoff while the issuer fails, and never sends an SVID with less than a tenth of its lifetime left. It sends an update to every stream whenever the SVID or the trust domain's X.509 authorities change. `crl` and `federated_bundles` are empty. Until the first SVID exists, and until the bundle has an X.509 authority, a stream waits. The agent sends an SVID only if it chains to the bundle it sends with it, checked again whenever either changes, and renews early an SVID whose anchor has left the bundle; it fetches the bundle once more when the chain does not verify, and treats an SVID that still does not as a failed request. When the issuer refuses a request, the first or a renewal (`PermissionDenied` below), every open stream ends with that code and the agent drops the SVID; it remembers the refusal for one minute and answers new streams with it without asking the issuer again. A stream that has no SVID to send when the agent cannot produce its proof of identity ends with `FailedPrecondition`. |
 | `FetchX509Bundles` | Streams the X.509 authorities of the trust domain's bundle, keyed by the trust domain's SPIFFE ID, and sends an update whenever they change. Like the JWT bundle, a bundle without X.509 authorities is never sent. |
@@ -1215,7 +1234,8 @@ X.509-SVIDs.
 ## 10. Security considerations
 
 - **The issuer is the trust root.** Its signing keys can mint any identity in the trust domain.
-  Store them like any CA key and rotate them (section 2.4).
+  Store them like any CA key and rotate them (section 2.4). Deleting every key file stops JWT
+  signing at once, the response to a compromise of the only key.
 - **The state is the policy.** Whoever can write the stored state, and any identity holding `write`
   on `/`, controls every identity. Grant that sparingly and protect the storage like the signing
   keys. The issuer's settings (section 5.2) bound what even they can do with files on the issuer's

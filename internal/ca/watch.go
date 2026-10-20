@@ -2,6 +2,7 @@ package ca
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"log/slog"
 	"path/filepath"
@@ -146,9 +147,9 @@ func (w *Watcher) Run(ctx context.Context, interval time.Duration) error {
 // Reload reads the files now and reports whether the published anchors
 // changed.
 func (w *Watcher) Reload() bool {
-	incumbents := map[string]bool{}
+	incumbents := map[string]*x509.Certificate{}
 	for _, c := range w.set.CAs() {
-		incumbents[c.ID] = true
+		incumbents[c.ID] = c.Cert
 	}
 	r, err := readWith(w.opts, incumbents)
 	if err != nil {

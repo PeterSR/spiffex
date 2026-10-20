@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4/jwt"
+
+	"github.com/PeterSR/spiffex/internal/keyset"
 )
 
 func TestAuthentication(t *testing.T) {
@@ -167,4 +169,23 @@ func TestCallersAreRateLimited(t *testing.T) {
 		t.Error("no Retry-After")
 	}
 	wantStatus(t, h.as("/people/carol", http.MethodGet, "/state", nil), http.StatusOK)
+}
+
+// With no signing key the issuer mints no management token and publishes no
+// key to check one against, so the API admits nobody until a key is back:
+// a token signed before the last key was removed is refused as well. Reads
+// and writes of the stored state through the files go on as before.
+func TestNoSigningKeyAdmitsNobody(t *testing.T) {
+	h := newHarness(t, fileStore(t), people)
+	token := h.token("/people/alice")
+	wantStatus(t, h.do(http.MethodGet, "/state", token, nil), http.StatusOK)
+
+	h.source.set.Store(keyset.EmptySet())
+	wantStatus(t, h.do(http.MethodGet, "/state", token, nil), http.StatusUnauthorized)
+	if _, _, err := h.iss.Mint(id("/people/alice"), []string{h.iss.ManagementEndpoint()}); err == nil {
+		t.Error("the issuer minted a management token without a key")
+	}
+
+	h.source.set.Store(h.keys)
+	wantStatus(t, h.do(http.MethodGet, "/state", h.token("/people/alice"), nil), http.StatusOK)
 }

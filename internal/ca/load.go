@@ -221,7 +221,7 @@ func read(opts Options) (*reading, error) { return readWith(opts, nil) }
 
 // readWith is read for a running issuer: incumbents holds the IDs of the CAs
 // in service, which keep their subject against a newcomer.
-func readWith(opts Options, incumbents map[string]bool) (*reading, error) {
+func readWith(opts Options, incumbents map[string]*x509.Certificate) (*reading, error) {
 	if err := opts.check(); err != nil {
 		return nil, err
 	}
@@ -336,9 +336,11 @@ func sharedSubjectError(c *x509.Certificate, file string) error {
 // refuseSharedSubjects fails the CAs whose subject another CA or anchor with a
 // different key already has. A CA in service keeps its name against a
 // newcomer; among the rest the older generation keeps it.
-func (r *reading) refuseSharedSubjects(incumbents map[string]bool) {
+func (r *reading) refuseSharedSubjects(incumbents map[string]*x509.Certificate) {
 	slices.SortStableFunc(r.cas, func(a, b CA) int {
-		if ia, ib := incumbents[a.ID], incumbents[b.ID]; ia != ib {
+		_, ia := incumbents[a.ID]
+		_, ib := incumbents[b.ID]
+		if ia != ib {
 			if ia {
 				return -1
 			}
@@ -356,6 +358,32 @@ func (r *reading) refuseSharedSubjects(incumbents map[string]bool) {
 		if !slices.ContainsFunc(r.cas, func(c CA) bool { return c.SelfSigned() && certID(c.Cert) == a.ID }) {
 			others = append(others, a)
 		}
+	}
+	// A running issuer also keeps the name of its CAs against a keyless
+	// self-signed certificate that has just appeared: it would otherwise be
+	// published beside them under one subject. The CAs in service count
+	// whether or not their files read well now. Only ca_roots may stand in
+	// the way of one.
+	if len(incumbents) > 0 {
+		var settled []Anchor
+		for _, a := range others {
+			clash := false
+			if a.Source != RootsSource {
+				for _, cert := range incumbents {
+					if bytes.Equal(cert.RawSubject, a.Cert.RawSubject) && !publicKeysEqual(cert.PublicKey, a.Cert.PublicKey) {
+						clash = true
+						break
+					}
+				}
+			}
+			if !clash {
+				settled = append(settled, a)
+				continue
+			}
+			r.errs = append(r.errs, itemError{key: stemOf(a.Source), err: sharedSubjectError(a.Cert, a.Source)})
+			r.anchors = slices.DeleteFunc(r.anchors, func(have Anchor) bool { return have.ID == a.ID })
+		}
+		others = settled
 	}
 	var kept []CA
 	for _, c := range r.cas {

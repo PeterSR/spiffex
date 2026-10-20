@@ -3,6 +3,7 @@
 package issuer
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -339,14 +340,34 @@ func (iss *Issuer) Bundle() ([]byte, error) {
 	}
 	b.SetSequenceNumber(seq)
 	b.SetRefreshHint(iss.cfg.RefreshHint)
-	return b.Marshal()
+	body, err := b.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	// With every key and CA file gone the list is empty, and go-spiffe writes
+	// it as null; a consumer must be able to tell "nothing" from a bad document.
+	return bytes.Replace(body, []byte(`"keys":null`), []byte(`"keys":[]`), 1), nil
 }
 
-// Mint signs a JWT-SVID for id with the given audiences. A token for the
-// management endpoint lives at most five minutes.
+// errNoJWTKeys is the answer to a request for a JWT-SVID when the keys
+// directory holds no key at all, as it is for an X.509-SVID when no CA
+// is left: the issuer is configured to issue no such SVID right now, and
+// retrying does not help until an operator adds a key.
+var errNoJWTKeys = errInvalidRequest("this issuer issues no JWT-SVIDs")
+
+// hasJWTKeys reports whether the issuer has any JWT signing key, exposed or
+// not. With keys that all are exposed the issuer is broken and answers
+// server_error, as it does for a CA that cannot sign.
+func (iss *Issuer) hasJWTKeys() bool {
+	set, _, _ := iss.cfg.Keys.Current()
+	return !set.Empty()
+}
+
 // errNoSigningKey means every signing key is exposed, so none may sign.
 var errNoSigningKey = errors.New("no signing key may sign")
 
+// Mint signs a JWT-SVID for id with the given audiences. A token for the
+// management endpoint lives at most five minutes.
 func (iss *Issuer) Mint(id spiffeid.ID, audiences []string) (token string, expires time.Time, err error) {
 	if !id.MemberOf(iss.cfg.TrustDomain) {
 		return "", time.Time{}, fmt.Errorf("%s is not in trust domain %s", id, iss.cfg.TrustDomain)
@@ -361,6 +382,9 @@ func (iss *Issuer) Mint(id spiffeid.ID, audiences []string) (token string, expir
 	}
 	now := iss.cfg.Now().Truncate(time.Second)
 	set, _, _ := iss.cfg.Keys.Current()
+	if set.Empty() {
+		return "", time.Time{}, errNoJWTKeys
+	}
 	key, ok := set.Active(now, iss.cfg.ActivationDelay)
 	if !ok {
 		iss.cfg.Logger.Error("no signing key may sign: every key is exposed; add a new key that only the issuer can read")
@@ -422,8 +446,15 @@ func (iss *Issuer) checkAudiences(audiences []string) ([]string, error) {
 	return out, nil
 }
 
+// algorithms lists the signing algorithms of the published keys. With none
+// published it lists the ones the issuer can sign with, because relying
+// parties read the list once and keep it, and the JWKS already says there is
+// no key.
 func algorithms(set *keyset.Set) []string {
-	var algs []string
+	if set.Empty() {
+		return []string{string(keyset.ES256), string(keyset.RS256)}
+	}
+	algs := []string{}
 	for _, k := range set.Keys() {
 		if !slices.Contains(algs, string(k.Algorithm)) {
 			algs = append(algs, string(k.Algorithm))

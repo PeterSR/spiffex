@@ -15,6 +15,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/spiffe/go-spiffe/v2/bundle/spiffebundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
@@ -194,6 +196,8 @@ type Token struct {
 	SPIFFEID spiffeid.ID
 	Expires  time.Time
 	Lifetime time.Duration
+	// KeyID is the kid of the key that signed the token.
+	KeyID string
 }
 
 // FetchToken requests a JWT-SVID for the audiences.
@@ -230,7 +234,11 @@ func (c *IssuerClient) FetchToken(ctx context.Context, cred Credential, audience
 	if !svid.Expiry.After(now) {
 		return Token{}, errors.New("token endpoint: issued an expired token")
 	}
-	return Token{Value: tr.AccessToken, SPIFFEID: svid.ID, Expires: svid.Expiry, Lifetime: svid.Expiry.Sub(now)}, nil
+	var kid string
+	if parsed, err := jwt.ParseSigned(tr.AccessToken, []jose.SignatureAlgorithm{jose.ES256, jose.RS256}); err == nil && len(parsed.Headers) == 1 {
+		kid = parsed.Headers[0].KeyID
+	}
+	return Token{Value: tr.AccessToken, SPIFFEID: svid.ID, Expires: svid.Expiry, Lifetime: svid.Expiry.Sub(now), KeyID: kid}, nil
 }
 
 // postToken sends one token request and returns the body of a successful
@@ -266,7 +274,10 @@ func (c *IssuerClient) postToken(ctx context.Context, form url.Values) ([]byte, 
 	return body, nil
 }
 
-// FetchBundle fetches the trust domain's SPIFFE bundle.
+// FetchBundle fetches the trust domain's SPIFFE bundle. A bundle with only
+// X.509 authorities is fine (an issuer whose JWT keys were all removed), as
+// is one with only JWT authorities, and one with an empty key list (an issuer
+// that lost every key and CA file), which is a revocation and not an error.
 func (c *IssuerClient) FetchBundle(ctx context.Context) (*spiffebundle.Bundle, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
@@ -289,9 +300,6 @@ func (c *IssuerClient) FetchBundle(ctx context.Context) (*spiffebundle.Bundle, e
 	bundle, err := spiffebundle.Parse(c.trustDomain, body)
 	if err != nil {
 		return nil, fmt.Errorf("bundle endpoint: %w", err)
-	}
-	if len(bundle.JWTAuthorities()) == 0 {
-		return nil, errors.New("bundle endpoint: the bundle has no JWT authorities")
 	}
 	return bundle, nil
 }

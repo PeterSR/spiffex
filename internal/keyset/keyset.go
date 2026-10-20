@@ -86,6 +86,13 @@ type Set struct {
 	keys []Key
 }
 
+// ErrNoKeys is what LoadDir returns for a directory with no key files.
+var ErrNoKeys = errors.New("no key files")
+
+// EmptySet is the set of an issuer that has no signing key: it publishes and
+// signs nothing.
+func EmptySet() *Set { return &Set{} }
+
 // NewSet builds a set from keys in any order.
 func NewSet(keys []Key) (*Set, error) {
 	if len(keys) == 0 {
@@ -107,6 +114,10 @@ func NewSet(keys []Key) (*Set, error) {
 	}
 	return &Set{keys: sorted}, nil
 }
+
+// Empty reports whether the set has no key at all, which is not the same as
+// having keys that may not sign (they are all exposed).
+func (s *Set) Empty() bool { return len(s.keys) == 0 }
 
 // Keys returns every key in the set, oldest first.
 func (s *Set) Keys() []Key {
@@ -220,7 +231,7 @@ func LoadDir(dir string) (*Set, error) {
 		keys = append(keys, k)
 	}
 	if len(keys) == 0 {
-		return nil, fmt.Errorf("no key files (key-<YYYYMMDDTHHMMSSZ>.pem) in %s", dir)
+		return nil, fmt.Errorf("%w (key-<YYYYMMDDTHHMMSSZ>.pem) in %s", ErrNoKeys, dir)
 	}
 	return NewSet(keys)
 }

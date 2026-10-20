@@ -142,7 +142,9 @@ CA certificate, then any CA certificates between it and its root) and `ca-202610
 (PEM, mode 0600). A key without a certificate is a request waiting for `ca import`. A self-signed
 certificate without a key is published as a trust anchor and never signs. Other files are ignored.
 The subject of a CA must differ from every other CA's with a different key; `ca csr` and `ca init`
-make unique ones, and the issuer refuses a CA your CA signed with a subject already in use. Every
+make unique ones, and the issuer refuses a CA your CA signed with a subject already in use. A running
+issuer keeps the subject of its CA against a certificate that appears later: a self-signed certificate
+with the same subject and another key is logged and not published, with or without a key file. Every
 self-signed CA in `ca_dir` and every certificate in `ca_roots` is published as an X.509
 authority; an intermediate is never published, only the root it chains to.
 
@@ -491,7 +493,23 @@ and only then prune and deploy again. Pruning the local copy early can delete th
 signing with.
 
 If a signing key is compromised, delete its file at once and accept that tokens it signed stop
-verifying.
+verifying. That includes the only key: with no key file left for two polls in a row (a single poll
+that finds none only logs a warning, so an editor that renames the file away and back does no harm, and
+the response takes up to two `-reload-interval`s), the running issuer stops signing
+JWT-SVIDs, as it stops signing X.509-SVIDs when the key of the last CA is removed. It logs an error
+and keeps running; the token endpoint answers a request for a JWT-SVID with `invalid_request` ("this
+issuer issues no JWT-SVIDs"), the JWKS and the bundle publish no JWT key, discovery lists no signing
+algorithm (it lists the ones it can sign with, ES256 and RS256), and X.509-SVIDs are unaffected. The management API admits nobody meanwhile, since it
+can no longer mint or verify a management token; edit the stored state through its files if you
+must. Run `key add` to make a new key: it signs at once, as in a new trust domain, and the issuer
+picks it up within `-reload-interval`.
+
+An issuer started with an empty `keys_dir` does the same, if it has a `ca_dir` with anchors: it
+starts, logs an error, publishes the anchors and issues X.509-SVIDs, and issues JWT-SVIDs once a key
+appears. Without a CA there would be nothing to publish, and it refuses to start. Removing the key
+of the last CA is the same story for X.509 (see "The certificate authority"). A key that is only
+exposed, readable by the verifier user, is a different case: it stays published, and the endpoint
+answers `server_error` until a key the issuer alone can read is added.
 
 When the keys directory is a Kubernetes Secret, keep the key files under their own names in the
 Secret and update the Secret as a whole; the issuer treats a rewrite of files it already knows as no

@@ -140,6 +140,13 @@ func (iss *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token, expires, err := iss.Mint(g.id, g.audiences)
+	if errors.Is(err, errNoJWTKeys) {
+		// A reload during authentication took the last key: the same state
+		// gets the same answer whichever read sees it.
+		iss.cfg.Logger.Error("no JWT-SVID can be issued: the issuer has no signing key", "spiffe_id", g.id, "origin", g.origin.Name)
+		writeJSON(w, errNoJWTKeys.status, errNoJWTKeys, "no-store")
+		return
+	}
 	if err != nil {
 		iss.cfg.Logger.Error("minting a JWT-SVID failed", "spiffe_id", g.id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, &oauthError{Code: "server_error"}, "no-store")
@@ -241,6 +248,9 @@ func (iss *Issuer) checkRequestedType(form url.Values, caSet *ca.Set) (bool, err
 		}
 		if len(form["audience"]) == 0 {
 			return false, errInvalidRequest("audience is required")
+		}
+		if !iss.hasJWTKeys() {
+			return false, errNoJWTKeys
 		}
 		return false, nil
 	case TokenTypeX509SVID:

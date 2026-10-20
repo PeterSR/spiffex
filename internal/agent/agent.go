@@ -156,12 +156,38 @@ func (a *Agent) refreshBundle(ctx context.Context) time.Duration {
 		a.logger.Info("trust bundle updated", "keys", len(bundle.JWTAuthorities()), "x509_authorities", len(bundle.X509Authorities()), "x509_svids", a.issuer.X509Supported())
 	}
 	a.bundleMu.Unlock()
+	a.dropTokensOfRemovedKeys(bundle)
 
 	hint, ok := bundle.RefreshHint()
 	if !ok {
 		hint = defaultRefreshHint
 	}
 	return max(hint, minRefresh)
+}
+
+// signedByCurrentKey reports whether the token's key is in the bundle the agent
+// holds now. Without a bundle yet there is nothing to judge by.
+func (a *Agent) signedByCurrentKey(t Token) bool {
+	bundle, _ := a.currentBundle()
+	if bundle == nil {
+		return true
+	}
+	_, ok := bundle.JWTAuthorities()[t.KeyID]
+	return ok
+}
+
+// dropTokensOfRemovedKeys forgets the cached JWT-SVIDs signed by a key that
+// has left the bundle: removing a key revokes what it signed, and a workload
+// must not be handed a token every verifier now refuses.
+func (a *Agent) dropTokensOfRemovedKeys(bundle *spiffebundle.Bundle) {
+	authorities := bundle.JWTAuthorities()
+	a.tokenMu.Lock()
+	defer a.tokenMu.Unlock()
+	for key, t := range a.tokens {
+		if _, ok := authorities[t.KeyID]; !ok {
+			delete(a.tokens, key)
+		}
+	}
 }
 
 // sameAuthorities compares only the keys and certificates. Sequence numbers
@@ -467,8 +493,13 @@ func (a *Agent) fetchToken(key string, audiences []string, call *tokenCall) {
 		if len(a.tokens) >= maxTokenCacheEntries {
 			clear(a.tokens)
 		}
-		a.tokens[key] = t
 		a.id = t.SPIFFEID
+		// A token whose key left the bundle while it was being fetched is
+		// returned to those waiting but not kept, or the cache would serve a
+		// revoked token the refresh that dropped its key already missed.
+		if a.signedByCurrentKey(t) {
+			a.tokens[key] = t
+		}
 	}
 	close(call.done)
 }
