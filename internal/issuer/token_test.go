@@ -91,7 +91,11 @@ func yamlString(s string) string {
 	return string(data)
 }
 
-func newTokenFixture(t *testing.T) *tokenFixture {
+func newTokenFixture(t *testing.T) *tokenFixture { return newTokenFixtureWith(t, nil) }
+
+// newTokenFixtureWith lets mutate change the issuer's configuration before
+// the issuer is made.
+func newTokenFixtureWith(t *testing.T, mutate func(f *tokenFixture, cfg *Config)) *tokenFixture {
 	t.Helper()
 	f := &tokenFixture{now: time.Now()}
 	var err error
@@ -140,9 +144,18 @@ origins:
     svid_types: [x509]
     members:
       xonly: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
+  narrowx:
+    provider: keys
+    audiences: [orders]
+    svid_types: [jwt, x509]
+    members:
+      narrowx: { keys: [` + yamlString(publicPEM(t, &f.ecKey.PublicKey)) + `] }
   kube-x509:
     provider: cluster
     svid_types: [x509]
+  kube-jwt:
+    provider: cluster
+    svid_types: [jwt]
   kube:
     provider: cluster
   kube-staging:
@@ -169,7 +182,7 @@ providers:
 	}
 	s := state.DefaultSettings(f.srv.URL, td)
 	s.Verifiers = [][]string{{exe, "verifier"}}
-	p := policy.New(policy.Options{Settings: s})
+	p := policy.New(policy.Options{Settings: s, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err := p.Apply(&store.Snapshot{Version: "v1", State: st}); err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +190,7 @@ providers:
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.iss, err = New(Config{
+	cfg := Config{
 		URL:         f.srv.URL,
 		TrustDomain: td,
 		Keys:        staticKeys{set: set, seq: 1},
@@ -185,7 +198,11 @@ providers:
 		Verifiers:   runner,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Now:         func() time.Time { return f.now },
-	})
+	}
+	if mutate != nil {
+		mutate(f, &cfg)
+	}
+	f.iss, err = New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

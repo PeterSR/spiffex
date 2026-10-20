@@ -15,7 +15,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   choose which kinds of SVID an origin issues (section 4.5), and a complete Workload API server in
   the agent (section 9). The state accepts and checks the new `svid_types` field on origins and
   providers, and the token endpoint refuses a JWT-SVID to an origin whose list lacks `jwt`
-  (`invalid_target`, after authentication). The token endpoint does not issue X.509-SVIDs yet.
+  (`invalid_target`, after authentication).
 - The certificate authority for X.509-SVIDs. The settings `ca_dir`, `ca_roots`,
   `ca_roots_dedicated` and `x509_svid_ttl` give the issuer a CA, a root it holds or an intermediate
   under the operator's own root. The issuer checks every CA certificate against the profile of SPEC
@@ -24,6 +24,18 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   authorities (`use: x509-svid`, with `x5c`), counted into `spiffe_sequence`. The JWKS never holds
   them. The discovery document says `spiffex_x509_svid_supported: true` while a CA can sign.
   `spiffex ca init`, `csr`, `import`, `list` and `prune` make and manage the CA files.
+- The token endpoint issues X.509-SVIDs. A client credentials or token exchange request with
+  `requested_token_type=urn:spiffex:token-type:x509-svid` and a `csr` (DER, base64url) gets the
+  certificate chain in `access_token`, for the SPIFFE ID the origin would have named in a JWT-SVID.
+  Only the CSR's public key is used (ECDSA P-256 or P-384, Ed25519, or RSA of 2048 to 4096 bits);
+  keys the issuer already uses are refused. The certificate has the subject `O=<trust domain>, CN=<SPIFFE ID>`, one URI
+  SAN and the lifetime `x509_svid_ttl`, shortened where the CA's chain ends sooner. An origin's
+  `svid_types` is enforced for X.509-SVIDs, a `csr` without the X.509 type and an unknown
+  `requested_token_type` are `invalid_request`, and each certificate is logged with its serial number.
+- `spiffex token -x509 -key-out FILE -cert-out FILE [-bundle-out FILE]` fetches an X.509-SVID for a
+  new P-256 key made in memory, written with mode 0600 and never over an existing file.
+- `POST /manage/check` reports `x509_under_restriction`: the origins that list `x509` under an
+  audience restriction, which does not cover their X.509-SVIDs.
 
 ## [0.1.3] - 2026-10-19
 

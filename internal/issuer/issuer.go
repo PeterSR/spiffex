@@ -15,6 +15,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -113,7 +114,10 @@ type Issuer struct {
 	replay   *replayCache
 	// These keep requests anyone can send from flooding the log, each on its
 	// own so that a flood of rejections cannot hide server errors.
-	rejectLog, errorLog logLimiter
+	rejectLog, errorLog, warnLog logLimiter
+	// noCommonName holds the origins already warned about for an
+	// X.509-SVID without a common name.
+	noCommonName sync.Map
 }
 
 // New validates cfg, fills in defaults and returns an Issuer.

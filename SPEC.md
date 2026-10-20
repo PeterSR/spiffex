@@ -299,7 +299,7 @@ Errors follow [RFC 6749] section 5.2: a JSON body with `error` and optionally `e
 
 | Situation | `error` | Status |
 |---|---|---|
-| Malformed request: wrong content type, missing or repeated parameter (`grant_type` included), wrong `client_assertion_type`, bad audience value, oversized body; an `audience` with an X.509-SVID request, a missing `csr` with one, a `csr` with a JWT-SVID request; a `requested_token_type` that is neither of the two; an X.509-SVID requested from an issuer without a certificate authority | `invalid_request` | 400 |
+| Malformed request: wrong content type, missing or repeated parameter (`grant_type` included), wrong `client_assertion_type`, bad audience value, oversized body; an `audience` with an X.509-SVID request, a missing `csr` with one, a `csr` with a JWT-SVID request; a `requested_token_type` that is neither of the two; an X.509-SVID requested from an issuer without a certificate authority, or whose certificate authority has no CA left with a key | `invalid_request` | 400 |
 | A `grant_type` other than the two above | `unsupported_grant_type` | 400 |
 | Client credentials: any failure to authenticate the client with a well-formed assertion | `invalid_client` | 401 |
 | Token exchange: the subject token is invalid, or its origin does not admit it | `invalid_request` | 400 |
@@ -311,7 +311,8 @@ Errors follow [RFC 6749] section 5.2: a JSON body with `error` and optionally `e
 The issuer MUST finish authenticating the caller before it returns `invalid_target`, so the response
 does not reveal what a given client or token would be permitted. The same holds for the contents of
 a `csr`: a request with a bad `csr` and a bad proof is answered as a bad proof. Whether a `csr` is
-present is a property of the request and is answered first, like a bad audience. After
+present is a property of the request and is answered first, like a missing audience, and so is whether
+the issuer has a certificate authority at all. After
 authentication the issuer checks the origin's `svid_types` (section 4.5) before the audience
 restriction (section 4.4) and before the contents of the `csr`. A request refused for its origin's
 `svid_types` or for the contents of its `csr` has already consumed the assertion's `jti`
@@ -404,12 +405,17 @@ registered token type names a certificate.
 **The request.** After authentication the issuer MUST:
 
 1. decode the `csr` and refuse it unless it is DER, at most 8 KiB and version 1 (the integer 0),
-   and refuse a key that is not ECDSA on P-256 or RSA of 2048 to 4096 bits with public exponent
-   65537, so that an unbounded modulus cannot be used to make the signature check expensive;
+   and refuse a key that is not ECDSA on P-256 or P-384, Ed25519, or RSA of 2048 to 4096 bits with
+   public exponent 65537, so that an unbounded modulus cannot be used to make the signature check
+   expensive. An Ed25519 key MUST also be refused unless it is the canonical encoding of a point of
+   the curve and the point is not of small order (its multiple by 8 is not the identity): for such a
+   key a signature that verifies can be made without any private key, so the check in step 2 would
+   prove nothing;
 2. refuse the `csr` unless its signature verifies with the public key it contains, which proves the
    requester holds the private key. The signature algorithm is ecdsa-with-SHA256 for a P-256 key,
-   or sha256WithRSAEncryption, sha384WithRSAEncryption or sha512WithRSAEncryption for an RSA key;
-   RSASSA-PSS is not accepted;
+   ecdsa-with-SHA256 or ecdsa-with-SHA384 for a P-384 key (OpenSSL signs with SHA-256 by default),
+   pure Ed25519 for an Ed25519 key, or sha256WithRSAEncryption, sha384WithRSAEncryption or
+   sha512WithRSAEncryption for an RSA key; RSASSA-PSS is not accepted;
 3. refuse a key equal to one of the issuer's own CA or JWT signing keys, or to a member key of any
    `keys` origin: a workload's certificate key is its own and new. This only catches clients that
    make their own keys, as an agent generates a new one every time;
@@ -423,11 +429,11 @@ registered token type names a certificate.
 | Serial number | a positive integer of at most 20 octets: 128 bits from a cryptographic random source, with the top bit cleared |
 | Issuer | the signing CA certificate's subject, byte for byte |
 | Subject | `O=<trust domain>` then `CN=<SPIFFE ID>`, each one UTF8String attribute in its own RDN. `O` is omitted when the trust domain name exceeds 64 characters and `CN` when the SPIFFE ID does (the upper bounds of [RFC 5280]); neither is ever truncated. Nothing from the CSR |
-| Validity | `notBefore` the current time minus 30 seconds; `notAfter` the earliest of the current time plus the X.509-SVID lifetime (section 7.2) and the `notAfter` of every certificate in the chain up to and including the anchor |
+| Validity | `notBefore` the current time minus 30 seconds, but not before the `notBefore` of any certificate in the chain; `notAfter` the earliest of the current time plus the X.509-SVID lifetime (section 7.2) and the `notAfter` of every certificate in the chain up to and including the anchor |
 | Subject public key | the CSR's |
 | `subjectAltName` | exactly one name, a URI: the SPIFFE ID; critical exactly when the subject is empty |
 | `basicConstraints` | `cA: false`, critical |
-| `keyUsage` | `digitalSignature`, plus `keyEncipherment` for an RSA key; critical |
+| `keyUsage` | `digitalSignature`, plus `keyEncipherment` for an RSA key only; critical |
 | `extKeyUsage` | `serverAuth` and `clientAuth`; not critical |
 | `authorityKeyIdentifier` | `keyIdentifier` only: the signing CA's `subjectKeyIdentifier` |
 | `subjectKeyIdentifier` | the SHA-1 digest of the subject public key bit string ([RFC 5280] section 4.2.1.2, method 1) |

@@ -356,8 +356,8 @@ func (s *Set) Select(now time.Time, lifetime time.Duration) (Choice, error) {
 	if !ok {
 		return Choice{}, ErrNoSigningCA
 	}
-	choice := Choice{CA: c, NotAfter: now.Add(lifetime)}
-	if end := c.notAfter(); end.Before(choice.NotAfter) {
+	choice := Choice{CA: c, NotAfter: now.Add(lifetime).Truncate(time.Second)}
+	if end := c.notAfter().Truncate(time.Second); end.Before(choice.NotAfter) {
 		choice.NotAfter, choice.Shortened = end, true
 	}
 	if choice.NotAfter.Sub(now) < MinLifetime {

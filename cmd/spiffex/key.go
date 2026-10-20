@@ -98,9 +98,14 @@ func writePrivateKey(path string, signer crypto.Signer) error {
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
+		_ = os.Remove(path)
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func writePublicKey(w io.Writer, pub crypto.PublicKey) error {

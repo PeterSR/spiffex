@@ -371,6 +371,9 @@ func printAnswer(call *manageCall, resp *http.Response, body []byte) error {
 		for _, name := range result.Overrides {
 			fmt.Printf("note: provider %s overrides the shipped provider of that name\n", name)
 		}
+		for _, name := range result.X509UnderRestriction {
+			fmt.Printf("warning: origin %s lists x509 and has an audience restriction, which does not cover its X.509-SVIDs\n", name)
+		}
 		if !result.Valid {
 			return fmt.Errorf("%s is invalid", call.what)
 		}

@@ -14,6 +14,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"syscall"
+
+	"github.com/PeterSR/spiffex/internal/issuer"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -28,7 +30,7 @@ type command struct {
 var commands = []command{
 	{"issuer", "run the issuer", runIssuer},
 	{"agent", "run the agent for one workload", runAgent},
-	{"token", "fetch a JWT-SVID from the issuer and print it", runToken},
+	{"token", "fetch a JWT-SVID from the issuer and print it, or write an X.509-SVID", runToken},
 	{"health", "check that an agent is serving, for container probes", runHealth},
 	{"key", "generate and manage keys", runKey},
 	{"ca", "make and manage the certificate authority for X.509-SVIDs", runCA},
@@ -199,5 +201,40 @@ func newLogger(level string) (*slog.Logger, error) {
 	if err := l.UnmarshalText([]byte(level)); err != nil {
 		return nil, fmt.Errorf("log level %q: want debug, info, warn or error", level)
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})), nil
+	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+	return slog.New(&auditHandler{inner: h, min: l}), nil
+}
+
+// auditHandler drops records below the configured level, except those marked
+// with issuer.AuditAttr: the record of an issued X.509-SVID is the only trace
+// of it, so no log level may switch it off.
+type auditHandler struct {
+	inner slog.Handler
+	min   slog.Level
+}
+
+func (h *auditHandler) Enabled(_ context.Context, l slog.Level) bool {
+	return l >= min(h.min, slog.LevelInfo)
+}
+
+func (h *auditHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Level < h.min {
+		audit := false
+		r.Attrs(func(a slog.Attr) bool {
+			audit = a.Equal(issuer.AuditAttr)
+			return !audit
+		})
+		if !audit {
+			return nil
+		}
+	}
+	return h.inner.Handle(ctx, r)
+}
+
+func (h *auditHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &auditHandler{inner: h.inner.WithAttrs(attrs), min: h.min}
+}
+
+func (h *auditHandler) WithGroup(name string) slog.Handler {
+	return &auditHandler{inner: h.inner.WithGroup(name), min: h.min}
 }

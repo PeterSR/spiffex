@@ -175,32 +175,9 @@ func (c *IssuerClient) FetchToken(ctx context.Context, cred Credential, audience
 	}
 	form["audience"] = audiences
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenEndpoint, strings.NewReader(form.Encode()))
+	body, err := c.postToken(ctx, form)
 	if err != nil {
 		return Token{}, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return Token{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	if err != nil {
-		return Token{}, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var oe struct {
-			Code        string `json:"error"`
-			Description string `json:"error_description"`
-		}
-		refused := (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) &&
-			json.Unmarshal(body, &oe) == nil && slices.Contains(refusalCodes, oe.Code)
-		if refused {
-			return Token{}, &RejectedError{Code: oe.Code, Description: truncate(oe.Description, maxDescription)}
-		}
-		return Token{}, fmt.Errorf("token endpoint: %s", resp.Status)
 	}
 	var tr struct {
 		AccessToken string `json:"access_token"`
@@ -222,6 +199,39 @@ func (c *IssuerClient) FetchToken(ctx context.Context, cred Credential, audience
 		return Token{}, errors.New("token endpoint: issued an expired token")
 	}
 	return Token{Value: tr.AccessToken, SPIFFEID: svid.ID, Expires: svid.Expiry, Lifetime: svid.Expiry.Sub(now)}, nil
+}
+
+// postToken sends one token request and returns the body of a successful
+// response.
+func (c *IssuerClient) postToken(ctx context.Context, form url.Values) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var oe struct {
+			Code        string `json:"error"`
+			Description string `json:"error_description"`
+		}
+		refused := (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) &&
+			json.Unmarshal(body, &oe) == nil && slices.Contains(refusalCodes, oe.Code)
+		if refused {
+			return nil, &RejectedError{Code: oe.Code, Description: truncate(oe.Description, maxDescription)}
+		}
+		return nil, fmt.Errorf("token endpoint: %s", resp.Status)
+	}
+	return body, nil
 }
 
 // FetchBundle fetches the trust domain's SPIFFE bundle.

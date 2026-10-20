@@ -75,6 +75,36 @@ func bundleX509Keys(t *testing.T, url string) int {
 	return n
 }
 
+// startTestIssuer runs the issuer until the test ends and waits for it to
+// answer.
+func startTestIssuer(t *testing.T, config, url string, extra ...string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runIssuer(ctx, append([]string{"-config", config, "-listen", strings.TrimPrefix(url, "http://"), "-reload-interval", "100ms"}, extra...))
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("the issuer stopped with %v", err)
+		}
+	})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp, err := http.Get(url + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the issuer did not start: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // The issuer started with a ca_dir publishes the CA's anchors, announces
 // X.509-SVIDs, and picks up a CA added while it runs.
 func TestIssuerServesTheCA(t *testing.T) {
@@ -82,30 +112,7 @@ func TestIssuerServesTheCA(t *testing.T) {
 	if _, err := ca.Init(caDir, caTD, time.Now().Add(-48*time.Hour), 365*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runIssuer(ctx, []string{"-config", config, "-listen", strings.TrimPrefix(url, "http://"), "-reload-interval", "100ms"})
-	}()
-	defer func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Errorf("the issuer stopped with %v", err)
-		}
-	}()
-
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		resp, err := http.Get(url + "/healthz")
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the issuer did not start: %v", err)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	startTestIssuer(t, config, url)
 
 	var discovery map[string]any
 	getJSON(t, url+"/.well-known/openid-configuration", &discovery)
@@ -120,7 +127,7 @@ func TestIssuerServesTheCA(t *testing.T) {
 	if _, err := ca.Init(caDir, caTD, time.Now().Add(time.Second), 365*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	deadline = time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for bundleX509Keys(t, url) != 2 {
 		if time.Now().After(deadline) {
 			t.Fatal("the issuer did not publish the CA added while it runs")

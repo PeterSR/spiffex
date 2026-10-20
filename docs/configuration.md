@@ -222,6 +222,58 @@ ones; the certificates are public and not judged. A CA key that becomes readable
 exposed: its certificate stays published, but it never signs again, and a new CA key it can read is
 neither used nor published.
 
+## Asking for an X.509-SVID
+
+With a CA that can sign, a workload asks the token endpoint for a certificate instead of a JWT-SVID:
+the same authentication and the same SPIFFE ID, with `requested_token_type` and a `csr` in place of
+the `audience` (SPEC section 3.4). It works with both grants and with every kind of origin.
+
+```bash
+openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt -out svid.key
+openssl req -new -key svid.key -subj / -outform DER -out svid.csr
+curl -s https://issuer.example.org/token \
+  -d grant_type=client_credentials -d client_id=vms/billing \
+  -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \
+  --data-urlencode client_assertion="$ASSERTION" \
+  -d requested_token_type=urn:spiffex:token-type:x509-svid \
+  --data-urlencode csr="$(base64 -w0 < svid.csr | tr '+/' '-_' | tr -d =)"
+```
+
+The `access_token` of the answer is the certificate chain, leaf first and the root left out: the DER
+certificates concatenated and encoded as base64url without padding. `issued_token_type` is
+`urn:spiffex:token-type:x509-svid`, and `expires_in` the seconds to the leaf's `notAfter`.
+
+Only the CSR's public key is used: an ECDSA key on P-256 or P-384, an Ed25519 key, or an RSA key of
+2048 to 4096 bits with exponent 65537, signed with a matching algorithm (never RSASSA-PSS). Its
+subject, names, extensions and attributes are ignored. The certificate gets `O=<trust domain>` and
+`CN=<SPIFFE ID>` as its subject (either left out when longer than 64 characters), the SPIFFE ID as
+its one URI SAN, and the lifetime in `x509_svid_ttl`, shortened where the CA's chain ends sooner. A key the issuer already uses, as a CA or JWT signing key or a member key, is refused.
+
+| Answer | Meaning |
+|---|---|
+| `invalid_request` | a malformed request or `csr`, a `csr` without the X.509 type, an `audience` with it, or an issuer without a CA that holds a key |
+| `invalid_client` | the same as for a JWT-SVID: the proof failed |
+| `invalid_target` | the origin's `svid_types` lacks `x509`; origins with an audience restriction get JWT-SVIDs only unless they list `x509` |
+| `server_error` | the CA's chain ends in under five minutes, or every CA is exposed or expired; discovery then leaves out `spiffex_x509_svid_supported` |
+
+Every certificate is logged with its serial number, SPIFFE ID, origin and `notAfter`: that log is the
+only record, as an X.509-SVID cannot be revoked.
+
+`spiffex token` does the whole exchange, with a new P-256 key made in memory and never sent anywhere:
+
+```bash
+spiffex token -issuer https://issuer.example.org -client-id vms/billing -key-file billing.key \
+  -x509 -key-out svid.key -cert-out svid.crt -bundle-out bundle.crt
+```
+
+`-key-out` is written with mode `0600` and `-cert-out` (the chain, PEM) and the optional
+`-bundle-out` (the trust domain's X.509 authorities, PEM) with `0644`. None of the files may exist.
+The command creates them all first, then fetches the bundle (so it needs the issuer's bundle
+endpoint, and the bundle must hold X.509 authorities) before asking for a certificate, and verifies
+the chain against the bundle before writing anything. If any step fails, none of the files is left
+behind. A process killed outright (SIGKILL, a panic, power loss) can leave empty or partial files
+behind, the key file always with mode `0600`; delete them before running the command again.
+
 ## The state
 
 The state starts out empty, and an empty state admits nobody. A state that does not exist yet is
@@ -357,9 +409,10 @@ spiffex agent -issuer https://issuer.example.org \
 | `-socket-mode` | the socket's permissions, `0600` by default |
 | `-trust-domain` | refuse to start unless the issuer serves this trust domain |
 | `-ca-file` | CA certificates to trust for the issuer instead of the system roots, read at startup |
-| `-log-level` | `debug`, `info`, `warn` or `error` |
+| `-log-level` | `debug`, `info`, `warn` or `error`. The record of each issued X.509-SVID is written at every level, as it is the only trace of the certificate |
 
-`spiffex token` takes the same proof flags and prints one JWT-SVID. `spiffex health -socket PATH`
+`spiffex token` takes the same proof flags and prints one JWT-SVID, or with `-x509` writes an
+X.509-SVID (see above). `spiffex health -socket PATH`
 exits 0 once an agent serves a trust bundle on that socket, for a container startup or readiness
 probe.
 
