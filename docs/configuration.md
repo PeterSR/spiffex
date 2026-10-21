@@ -250,12 +250,13 @@ certificates concatenated and encoded as base64url without padding. `issued_toke
 Only the CSR's public key is used: an ECDSA key on P-256 or P-384, an Ed25519 key, or an RSA key of
 2048 to 4096 bits with exponent 65537, signed with a matching algorithm (never RSASSA-PSS). Its
 subject, names, extensions and attributes are ignored. The certificate gets `O=<trust domain>` and
-`CN=<SPIFFE ID>` as its subject (either left out when longer than 64 characters), the SPIFFE ID as
+`CN=<SPIFFE ID>` as its subject (either left out when longer than 64 characters; the origin's
+`x509.cn` chooses another CN, see [docs/x509.md](x509.md#choosing-the-common-name)), the SPIFFE ID as
 its one URI SAN, and the lifetime in `x509_svid_ttl`, shortened where the CA's chain ends sooner. A key the issuer already uses, as a CA or JWT signing key or a member key, is refused.
 
 | Answer | Meaning |
 |---|---|
-| `invalid_request` | a malformed request or `csr`, a `csr` without the X.509 type, an `audience` with it, or an issuer without a CA that holds a key |
+| `invalid_request` | a malformed request or `csr`, a `csr` without the X.509 type, an `audience` with it, an issuer without a CA that holds a key, or an origin whose `x509.cn` cannot name this identity (an operation does not apply, or the name exceeds 64 characters) |
 | `invalid_client` | the same as for a JWT-SVID: the proof failed |
 | `invalid_target` | the origin's `svid_types` lacks `x509`; origins with an audience restriction get JWT-SVIDs only unless they list `x509` |
 | `server_error` | the CA's chain ends in under five minutes, or every CA is exposed or expired; discovery then leaves out `spiffex_x509_svid_supported` |

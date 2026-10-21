@@ -33,6 +33,24 @@
     "match": { "$ref": "#/$defs/conditions" },
     "deny": { "$ref": "#/$defs/conditions" },
     "audiences": { "$ref": "#/$defs/patterns" },
+    "jwt": {
+      "description": "Reserved for settings of the origin's JWT-SVIDs; takes no keys yet (SPEC section 4.6).",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "x509": {
+      "description": "Settings for the origin's X.509-SVIDs (SPEC section 4.6).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cn": {
+          "description": "The common name template of the origin's X.509-SVIDs: literal text around one placeholder, {spiffe_id} or {path}, with the operations trim_prefix, trim_suffix and a final hash. Absent: the SPIFFE ID, or no common name when it exceeds 64 characters (SPEC section 4.6).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
     "svid_types": {
       "description": "The kinds of SVID the origin's identities may obtain. Absent: [jwt] when an audience restriction is in effect, else the provider's value, else [jwt, x509] (SPEC section 4.5).",
       "type": "array",

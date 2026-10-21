@@ -35,8 +35,14 @@ type Origin struct {
 	// jwt and x509 (SPEC section 4.5). Nil takes the default; an empty
 	// list is invalid, which omitzero (unlike omitempty) keeps visible to
 	// the schema.
-	SVIDTypes []string           `json:"svid_types,omitzero"`
-	Members   map[string]*Member `json:"members,omitempty"`
+	SVIDTypes []string `json:"svid_types,omitzero"`
+	// X509 holds the origin's settings for its X.509-SVIDs (SPEC section
+	// 4.6), replacing the provider's.
+	X509 *X509Settings `json:"x509,omitempty"`
+	// JWT is reserved for settings of the origin's JWT-SVIDs; it takes no
+	// keys yet (SPEC section 4.6).
+	JWT     *JWTSettings       `json:"jwt,omitempty"`
+	Members map[string]*Member `json:"members,omitempty"`
 }
 
 // Member is a workload of a keys origin (SPEC section 4.2).
@@ -59,6 +65,29 @@ type Provider struct {
 	Audiences   *Strings           `json:"audiences,omitempty"`
 	// SVIDTypes is the default for the origin's svid_types (SPEC section 4.5).
 	SVIDTypes []string `json:"svid_types,omitzero"`
+	// X509 is the default for the origin's x509 (SPEC section 4.6).
+	X509 *X509Settings `json:"x509,omitempty"`
+	// JWT is the default for the origin's jwt; it takes no keys yet.
+	JWT *JWTSettings `json:"jwt,omitempty"`
+}
+
+// JWTSettings is the jwt object of an origin or provider. It has no fields
+// yet and reserves the place for settings of JWT-SVIDs.
+type JWTSettings struct{}
+
+// X509Settings is the x509 object of an origin or provider (SPEC section 4.6).
+type X509Settings struct {
+	// CN is the common name template. A pointer because an empty template
+	// is invalid, not absent.
+	CN *string `json:"cn,omitempty"`
+}
+
+// cn returns the common name template of the settings, if any.
+func (x *X509Settings) cn() *string {
+	if x == nil {
+		return nil
+	}
+	return x.CN
 }
 
 // ParamType is the type of a provider parameter.

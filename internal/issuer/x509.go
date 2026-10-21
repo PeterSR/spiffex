@@ -199,7 +199,7 @@ func (iss *Issuer) issueX509(w http.ResponseWriter, g *grant) {
 	choice, err := g.ca.Select(now, iss.cfg.X509SVIDTTL)
 	if err == nil {
 		var leaf *x509.Certificate
-		if leaf, err = ca.IssueLeaf(choice, g.id, g.x509Key, now); err == nil {
+		if leaf, err = ca.IssueLeafCN(choice, g.id, g.commonName, g.x509Key, now); err == nil {
 			iss.respondX509(w, g, choice, leaf)
 			return
 		}
@@ -226,7 +226,7 @@ func (iss *Issuer) respondX509(w http.ResponseWriter, g *grant, choice ca.Choice
 	if choice.Shortened && iss.warnLog.allow(iss.cfg.Now()) {
 		iss.cfg.Logger.Warn("the signing CA's chain ends before a full X.509-SVID lifetime; issuing a shorter one", "ca", choice.CA.File, "not_after", leaf.NotAfter.UTC())
 	}
-	if leaf.Subject.CommonName == "" {
+	if leaf.Subject.CommonName == "" && g.origin.X509CN == nil {
 		if _, warned := iss.noCommonName.LoadOrStore(g.origin.Name, true); !warned {
 			iss.cfg.Logger.Warn("issued an X.509-SVID without a common name: the SPIFFE ID is longer than 64 characters", "spiffe_id", g.id, "origin", g.origin.Name)
 		}

@@ -162,6 +162,11 @@ func (p *Policy) apply(snap *store.Snapshot) error {
 			p.opts.Logger.Warn("an origin with an audience restriction lists x509, whose X.509-SVIDs the restriction does not cover", "origin", name)
 		}
 	}
+	for _, name := range report.X509CNUnused() {
+		if e := prev.expanded[name]; e == nil || !e.X509CNOwn || e.AllowsSVIDType("x509") {
+			p.opts.Logger.Warn("an origin sets x509.cn but does not list x509 in svid_types, so it never applies", "origin", name)
+		}
+	}
 	for _, name := range report.Overrides {
 		p.opts.Logger.Warn("a provider in the state overrides the shipped provider of that name", "provider", name)
 	}

@@ -56,9 +56,10 @@ const (
 	checkPrefixOverlap  = "prefix overlap"
 	checkAudienceUnique = "uniqueness of upstream issuer and audience"
 	checkGrantClosure   = "grant closure"
+	checkCommonNames    = "uniqueness of X.509 common names"
 )
 
-var crossObjectChecks = []string{checkPrefixOverlap, checkAudienceUnique, checkGrantClosure}
+var crossObjectChecks = []string{checkPrefixOverlap, checkAudienceUnique, checkCommonNames, checkGrantClosure}
 
 // Validate validates a whole state (SPEC section 6.2). It checks the size
 // and schema of the state itself, so a state built in Go gets the same
@@ -239,6 +240,7 @@ func (v *validator) run() *Report {
 	}
 	v.checkPrefixes(r.Origins)
 	v.checkAudiences(r.Origins)
+	v.checkCommonNames(r.Origins)
 	if grants != nil {
 		v.checkClosure(grants)
 		r.Grants = grants

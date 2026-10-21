@@ -326,6 +326,7 @@ Errors follow [RFC 6749] section 5.2: a JSON body with `error` and optionally `e
 | Token exchange: the subject token is invalid, or its origin does not admit it | `invalid_request` | 400 |
 | The caller authenticated, but may not request this audience | `invalid_target` | 400 |
 | The caller authenticated, but its origin's `svid_types` lacks the type requested (section 4.5) | `invalid_target` | 400 |
+| The caller authenticated, but the origin's `x509.cn` cannot name this identity: an operation does not apply, leaves nothing, or the name exceeds 64 characters (section 4.6) | `invalid_request` | 400 |
 | The caller authenticated, but the `csr` does not parse, its signature does not verify with its own key, or its key is not one section 3.4 accepts | `invalid_request` | 400 |
 | Anything else, including an issuer whose certificate authority cannot issue an X.509-SVID of useful length (section 2.5) | `server_error` | 500 |
 
@@ -335,8 +336,9 @@ a `csr`: a request with a bad `csr` and a bad proof is answered as a bad proof. 
 present is a property of the request and is answered first, like a missing audience, and so is whether
 the issuer has a certificate authority at all, or any signing key. After
 authentication the issuer checks the origin's `svid_types` (section 4.5) before the audience
-restriction (section 4.4) and before the contents of the `csr`. A request refused for its origin's
-`svid_types` or for the contents of its `csr` has already consumed the assertion's `jti`
+restriction (section 4.4) and before the contents of the `csr`, and the common name (section 4.6)
+after it. A request refused for its origin's
+`svid_types`, for the contents of its `csr` or for its common name has already consumed the assertion's `jti`
 (section 3.2), as a request with a bad audience does. Authentication failures of one grant MUST be
 indistinguishable from each other in status and body: an unknown client and a bad signature get the
 same answer, and so do a token with no origin and a token its origin refuses.
@@ -449,7 +451,7 @@ registered token type names a certificate.
 |---|---|
 | Serial number | a positive integer of at most 20 octets: 128 bits from a cryptographic random source, with the top bit cleared |
 | Issuer | the signing CA certificate's subject, byte for byte |
-| Subject | `O=<trust domain>` then `CN=<SPIFFE ID>`, each one UTF8String attribute in its own RDN. `O` is omitted when the trust domain name exceeds 64 characters and `CN` when the SPIFFE ID does (the upper bounds of [RFC 5280]); neither is ever truncated. Nothing from the CSR |
+| Subject | `O=<trust domain>` then `CN=<common name>`, each one UTF8String attribute in its own RDN. `O` is omitted when the trust domain name exceeds 64 characters. The common name is the origin's `x509.cn` filled in (section 4.6), or without one the SPIFFE ID, omitted when it exceeds 64 characters (the upper bounds of [RFC 5280]); neither is ever truncated. Nothing from the CSR |
 | Validity | `notBefore` the current time minus 30 seconds, but not before the `notBefore` of any certificate in the chain; `notAfter` the earliest of the current time plus the X.509-SVID lifetime (section 7.2) and the `notAfter` of every certificate in the chain up to and including the anchor |
 | Subject public key | the CSR's |
 | `subjectAltName` | exactly one name, a URI: the SPIFFE ID; critical exactly when the subject is empty |
@@ -473,10 +475,13 @@ PostgreSQL (`cert` authentication with a user name map), MariaDB (`REQUIRE SUBJE
 (mapping the common name to an ACL user) map a client certificate to a user by its CN or DN, and
 none of them reads a URI SAN, so without a subject an X.509-SVID could not authenticate to them.
 The subject is built only from the trust domain and the SPIFFE ID, never from the CSR. Because path
-segments cannot contain `/`, `,`, `=`, `+` or `\`, the common renderings of the subject are
-unambiguous. A CN is left out rather than shortened when the SPIFFE ID exceeds 64 characters, so two
-identities never share a CN and a consumer that matches on it fails closed. The issuer SHOULD log a
-warning naming the origin the first time it issues a certificate without a CN.
+segments cannot contain `/`, `,`, `=`, `+` or `\`, and the common name template of section 4.6 allows
+none of them either, the common renderings of the subject are unambiguous. Without a template, a CN is
+left out rather than shortened when the SPIFFE ID exceeds 64 characters, so two identities never share
+a CN and a consumer that matches on it fails closed. The issuer SHOULD log a warning naming the origin
+the first time it issues a certificate without a CN. With a template, the CN is the template's result,
+which section 4.6 keeps different between identities, and a template that cannot name an identity
+fails the request instead.
 
 **The response.** A successful response has the shape of section 3, with:
 
@@ -519,8 +524,10 @@ An origin has:
 
 An origin's **kind** is that of its provider's proof: `jwt`, `keys` or `exec`.
 
-Origin names, prefixes, and the upstream issuer and audience of `jwt` origins are not secret: the
-management API reveals them in conflicts (section 8.3). Providers are readable by every identity in
+Origin names, prefixes, the shape of X.509 common names (section 4.6), and the upstream issuer and
+audience of `jwt` origins are not secret from a caller who may write origins: the management API
+reveals them in conflicts (section 8.3), and trial writes can probe how the common names of an
+origin the caller may not read begin. Providers are readable by every identity in
 the trust domain, so a provider, an `exec` verifier's command included, is not secret either.
 
 ### 4.1 Naming: prefix and name template
@@ -560,12 +567,18 @@ cannot fill a placeholder. The operations apply to the claim's value in the orde
 |---|---|
 | `trim_prefix:<text>` | the value without `<text>` at its start |
 | `trim_suffix:<text>` | the value without `<text>` at its end |
+| `hash:<n>` | the first `<n>` characters of the lowercase, unpadded base32 ([RFC 4648] alphabet, `a-z` and `2-7`) encoding of the SHA-256 digest of the value |
 
-The argument is 1 to 255 characters from `A-Z a-z 0-9 . _ -`. When the value does not start, or
-end, with the argument, the request is rejected; the value is never passed through unchanged, or
-`team-a` and `a` would both become `a`. Every operation is one-to-one in this way, so a template
-with operations never gives two different values the same SPIFFE ID. An unknown operation makes
-the template invalid.
+The argument of a trim is 1 to 255 characters from `A-Z a-z 0-9 . _ -`. When the value does not
+start, or end, with the argument, the request is rejected; the value is never passed through
+unchanged, or `team-a` and `a` would both become `a`. The argument of `hash` is a whole number in
+decimal from 24 to 52, written without a sign or leading zeros; its result is always a valid
+segment, whatever the value held, which makes `hash` the way to use a claim whose value is not
+one. The trims are one-to-one in the way above, so a template with only trims never gives two
+different values the same SPIFFE ID. `hash` is one-to-one up to collisions of a truncated SHA-256:
+two values share a result only when their digests agree on the first `<n>` base32 characters, 5
+bits each, so 120 bits at the least. An operation after a `hash` works on its result. An unknown
+operation makes the template invalid.
 
 A placeholder's value, after its operations, MUST be a valid segment, or the request is rejected;
 it is never escaped or rewritten by any means other than its operations.
@@ -647,6 +660,74 @@ report it without refusing the state. Every other origin gets both kinds, so ena
 certificate authority gives them X.509-SVIDs; an operator who does not want a shared upstream's
 identities to authenticate to every server that trusts the bundle sets `svid_types: [jwt]`.
 
+### 4.6 X.509 common name
+
+An origin MAY also have a `jwt` object, which takes no keys yet (an empty object is accepted, any key
+is invalid) and reserves the place for settings of JWT-SVIDs. `audiences` stays at the top level.
+
+An X.509-SVID names its subject's common name by the origin's **common name template**, `x509.cn`
+(section 3.4). The provider MAY set a default, which the origin's own template replaces. When neither
+sets one, the common name is the SPIFFE ID, and none when the SPIFFE ID exceeds 64 characters.
+
+A common name template is literal text around **exactly one** placeholder. The placeholder is
+`{spiffe_id}`, the full SPIFFE ID (`spiffe://<trust domain><path>`), or `{path}`, its path, which
+starts with `/` (see below for why a name must not). Placeholders come from the issued SPIFFE ID alone and never from the subject token's
+claims: a common name must identify exactly one SPIFFE ID, and a name derived from claims could give
+two identities the same one. The placeholder MAY list operations as in section 4.1, with these
+differences: the argument of a trim is 1 to 64 characters from the set below, and `hash`, if there
+is one, is the last operation (there is at most one). The literal text, and the arguments of the
+trims, use only `A-Z a-z 0-9 . _ - / :`, the characters of a path segment plus `/` and `:`. No
+escape for `{`, `}` or `|` exists. Examples, for `spiffe://example.org/tenants/kokkenogco/backend`:
+
+| `x509.cn` | Common name |
+|---|---|
+| `{spiffe_id}` | `spiffe://example.org/tenants/kokkenogco/backend` |
+| `{path\|trim_prefix:/}` | `tenants/kokkenogco/backend` |
+| `{path\|trim_prefix:/tenants/}` | `kokkenogco/backend` |
+| `pg:{path\|hash:24}` | `pg:` and 24 characters of `a-z 2-7` |
+
+**A common name never starts with `/`.** PostgreSQL reads a `pg_ident.conf` system user that starts
+with `/` as a regular expression, quoted or not, and an unanchored one: a line for
+`/tenants/x/backend` would also admit `/zz/tenants/x/backend`. So a template whose literal text
+starts with `/` is invalid, and so is one whose names can start with `/`, such as `{path}` alone,
+`{path|trim_suffix:...}`, or a trim of the prefix that leaves the `/` (`trim_prefix:/tenants`). Trim
+it away (`{path|trim_prefix:/}`), trim more, or start with text (`pg:{path}`). The issuer MUST also
+refuse, as below, a name that would start with `/`. The default name, the full `spiffe://...` ID,
+does not start with `/`. Operators SHOULD NOT write regular expression lines for these names: each
+name is mapped with a plain quoted entry that does not start with `/`. If a regular expression is
+unavoidable it MUST be anchored and escape every regular expression metacharacter, `.` included,
+which a path segment may hold: `^` and `$` alone are not enough.
+
+The common name is the template filled in, and MUST be 1 to 64 characters, the upper bound of
+[RFC 5280]. When an operation does not apply to the identity, leaves nothing, or the result exceeds
+64 characters, the request for an X.509-SVID fails with `invalid_request` (section 3.1) and the issuer
+logs why. A name an operator asked for is never left out or shortened, unlike the default's. The
+check happens after the `csr` is checked, so the assertion's `jti` is consumed as for a bad `csr`.
+
+**Names do not clash.** Within an origin the template is one-to-one by construction: one placeholder,
+fixed text around it, trims that refuse what they do not apply to, and a final `hash`, which is
+one-to-one up to its collisions (section 4.1: at least 120 bits). Between origins, validation
+(section 6.2) MUST refuse a state in which two origins that may issue X.509-SVIDs could issue the same
+common name. An implementation MAY use any sufficient test that is sound: it MUST NOT accept a pair
+that can clash, and MAY refuse a pair that cannot. The test of the reference implementation describes
+what the common names of each origin can look like, using that the origins' prefixes do not overlap
+(section 4.1): every path of an origin starts with its prefix and, unless its name template is empty
+(when it is the prefix alone), `/` and a segment; the characters after that are those of a path.
+It follows each trim through that description, and accepts a pair when the descriptions show that
+some position differs, or that one name ends where the other goes on, or that the characters of one
+cannot be those of the other. Two hashes are accepted when they have the same length and text and
+their inputs cannot be equal. So `{path|trim_prefix:/tenants/}` is accepted next to the default and
+next to `{path|trim_prefix:/}`, but not next to another origin's `{path|trim_prefix:/other/}`, nor next to a
+`{path|hash:24}` (a tenant could be named like a hash); the usual remedy is text that differs in
+each origin's template, as in `tenant:{path|trim_prefix:/tenants/}` and `other:{path|...}`.
+A template with a trim that can never apply to any identity of the origin, or whose names are
+always more than 64 characters, is invalid. The check covers one state: after a template changes,
+or a name shape passes from one origin to another, certificates already issued with the old names stay
+valid for up to the X.509-SVID lifetime (section 7.2), so an operator SHOULD wait that long before
+mapping a name that was freed to a different role. An origin whose `svid_types` lacks `x509` is left out of
+the comparison, and setting `x509.cn` on it is allowed, but the validator SHOULD report it without
+refusing the state.
+
 ## 5. Providers
 
 A provider is a description of a kind of origin, held as a plain document. Its name follows the
@@ -660,6 +741,8 @@ rules for origin names. A provider has:
 | `name` | the default name template (section 4.1) |
 | `audiences` | OPTIONAL default audience restriction (section 4.4) |
 | `svid_types` | OPTIONAL default for the kinds of SVID an origin may obtain (section 4.5) |
+| `jwt` | OPTIONAL, an object that takes no keys yet (section 4.6) |
+| `x509.cn` | OPTIONAL default for the common name template of an origin's X.509-SVIDs (section 4.6) |
 | `description` | OPTIONAL text for humans |
 | `overrides` | OPTIONAL: `true` when the provider takes the place of a shipped one of the same name |
 
@@ -944,6 +1027,8 @@ origin is expanded with its provider and parameters, the following hold:
 - no pattern in `match`, `deny` or `audiences` is empty;
 - `svid_types`, on a provider or an origin, is not empty and lists only `jwt` and `x509`, each at
   most once;
+- `x509.cn`, on a provider or an origin, satisfies section 4.6, and no two origins that may issue
+  X.509-SVIDs could issue the same common name (a check across origins, so a single object skips it);
 - a member key given as a JWK has `use` absent or `sig`, and an `alg`, if present, that fits the
   key;
 - an `exec` command's path is absolute and clean (no `.` or `..` segments, no repeated `/`).
@@ -1317,6 +1402,7 @@ on the provider; requesting that single audience is RECOMMENDED. Trust policies 
 [Workload API]: https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md
 [RFC 2119]: https://www.rfc-editor.org/rfc/rfc2119
 [RFC 2986]: https://www.rfc-editor.org/rfc/rfc2986
+[RFC 4648]: https://www.rfc-editor.org/rfc/rfc4648
 [RFC 5280]: https://www.rfc-editor.org/rfc/rfc5280
 [RFC 6749]: https://www.rfc-editor.org/rfc/rfc6749
 [RFC 6901]: https://www.rfc-editor.org/rfc/rfc6901

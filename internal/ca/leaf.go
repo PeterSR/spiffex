@@ -21,12 +21,23 @@ const LeafBackdate = 30 * time.Second
 // Nothing but the key comes from the requester.
 func IssueLeaf(choice Choice, id spiffeid.ID, pub crypto.PublicKey, now time.Time) (*x509.Certificate, error) {
 	// Names too long for RFC 5280's bounds are left out, never shortened.
-	var org, cn string
-	if name := id.TrustDomain().Name(); len(name) <= MaxNameLength {
-		org = name
-	}
+	var cn string
 	if len(id.String()) <= MaxNameLength {
 		cn = id.String()
+	}
+	return IssueLeafCN(choice, id, cn, pub, now)
+}
+
+// IssueLeafCN is IssueLeaf with the common name chosen by the caller: cn is
+// the whole name, or empty for none. The caller has checked that it is at most
+// MaxNameLength characters; it is refused here otherwise rather than cut.
+func IssueLeafCN(choice Choice, id spiffeid.ID, cn string, pub crypto.PublicKey, now time.Time) (*x509.Certificate, error) {
+	if len(cn) > MaxNameLength {
+		return nil, fmt.Errorf("the common name is %d characters, more than the %d allowed", len(cn), MaxNameLength)
+	}
+	var org string
+	if name := id.TrustDomain().Name(); len(name) <= MaxNameLength {
+		org = name
 	}
 	subject, err := Name(org, cn)
 	if err != nil {

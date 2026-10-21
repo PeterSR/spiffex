@@ -6,18 +6,22 @@
 //
 //	ns/{kubernetes.io/namespace|trim_prefix:team-}/backend
 //
-// Every operation is one-to-one: an operation that does not apply refuses the
-// value instead of passing it through. Together with the rule that a filled
-// segment is never escaped, this means two different values can never give
-// the same name.
+// The trim operations are one-to-one: an operation that does not apply
+// refuses the value instead of passing it through. Together with the rule
+// that a filled segment is never escaped, this means two different values
+// can never give the same name, unless a hash operation is used, which is
+// one-to-one up to the collisions of a truncated SHA-256 (see Hash).
 //
 // The caller decides what a placeholder may name (Options.CheckPlaceholder)
 // and supplies the values (the lookup passed to Render).
 package nametemplate
 
 import (
+	"crypto/sha256"
+	"encoding/base32"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -29,7 +33,37 @@ var ErrNoOps = errors.New("takes no operations")
 const (
 	TrimPrefix = "trim_prefix"
 	TrimSuffix = "trim_suffix"
+	Hash       = "hash"
 )
+
+// The bounds of the argument of the hash operation: the number of characters
+// kept. 24 base32 characters are 120 bits, and 52 is the whole digest.
+const (
+	MinHashLength = 24
+	MaxHashLength = 52
+)
+
+var hashEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+
+// HashValue returns the first n characters of the lowercase, unpadded base32
+// (RFC 4648 alphabet) encoding of the SHA-256 digest of v. Its characters are
+// a-z and 2-7, so it is a valid path segment. Two different values give the
+// same result only when their digests agree on the first 5n bits, which for
+// n of at least 24 means 120 bits.
+func HashValue(v string, n int) string {
+	sum := sha256.Sum256([]byte(v))
+	return strings.ToLower(hashEncoding.EncodeToString(sum[:]))[:n]
+}
+
+// parseHashArg reads the argument of hash: a canonical decimal number from
+// MinHashLength to MaxHashLength.
+func parseHashArg(s string) (int, bool) {
+	n, err := strconv.Atoi(s)
+	if err != nil || strconv.Itoa(n) != s || n < MinHashLength || n > MaxHashLength {
+		return 0, false
+	}
+	return n, true
+}
 
 // Template is a parsed name template. An empty template names nothing. Make
 // one with Parse: a Template built by hand is not validated.
@@ -133,13 +167,23 @@ func parseOp(s string) (Op, error) {
 	if !ok {
 		return Op{}, fmt.Errorf("operation %q: want <name>:<argument>", s)
 	}
+	if name == Hash {
+		if _, ok := parseHashArg(arg); !ok {
+			return Op{}, hashArgError(s)
+		}
+		return Op{Name: name, Arg: arg}, nil
+	}
 	if name != TrimPrefix && name != TrimSuffix {
-		return Op{}, fmt.Errorf("operation %q: unknown operation %q; the operations are %s and %s", s, name, TrimPrefix, TrimSuffix)
+		return Op{}, fmt.Errorf("operation %q: unknown operation %q; the operations are %s, %s and %s", s, name, TrimPrefix, TrimSuffix, Hash)
 	}
 	if !segmentText(arg) {
 		return Op{}, fmt.Errorf("operation %q: the argument must be 1 to 255 characters from A-Z, a-z, 0-9, ., _ and -", s)
 	}
 	return Op{Name: name, Arg: arg}, nil
+}
+
+func hashArgError(s string) error {
+	return fmt.Errorf("operation %q: the argument of %s must be a whole number from %d to %d", s, Hash, MinHashLength, MaxHashLength)
 }
 
 // segmentText reports whether s is 1 to 255 characters a segment may hold.
@@ -150,15 +194,29 @@ func segmentText(s string) bool {
 
 // apply runs the operation on v. A trim whose text is not there refuses the
 // value rather than passing it through, or x and <prefix>x would both
-// become x.
+// become x. A hash always applies.
 func (op Op) apply(v string) (string, bool) {
 	switch op.Name {
 	case TrimPrefix:
 		return strings.CutPrefix(v, op.Arg)
 	case TrimSuffix:
 		return strings.CutSuffix(v, op.Arg)
+	case Hash:
+		n, ok := parseHashArg(op.Arg)
+		if !ok {
+			return "", false
+		}
+		return HashValue(v, n), true
 	}
 	return "", false
+}
+
+// HashLength returns the number of characters a hash operation keeps.
+func (op Op) HashLength() (int, bool) {
+	if op.Name != Hash {
+		return 0, false
+	}
+	return parseHashArg(op.Arg)
 }
 
 func (op Op) String() string { return op.Name + ":" + op.Arg }

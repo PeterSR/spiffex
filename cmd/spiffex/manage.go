@@ -374,6 +374,9 @@ func printAnswer(call *manageCall, resp *http.Response, body []byte) error {
 		for _, name := range result.X509UnderRestriction {
 			fmt.Printf("warning: origin %s lists x509 and has an audience restriction, which does not cover its X.509-SVIDs\n", name)
 		}
+		for _, name := range result.X509CNUnused {
+			fmt.Printf("warning: origin %s sets x509.cn but does not list x509 in svid_types, so it never applies\n", name)
+		}
 		if !result.Valid {
 			return fmt.Errorf("%s is invalid", call.what)
 		}

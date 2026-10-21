@@ -26,6 +26,24 @@
       "type": "string"
     },
     "audiences": { "$ref": "#/$defs/patterns" },
+    "jwt": {
+      "description": "Reserved for settings of the origin's JWT-SVIDs; takes no keys yet (SPEC section 4.6).",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "x509": {
+      "description": "Settings for the origin's X.509-SVIDs (SPEC section 4.6).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cn": {
+          "description": "The default for the origin's x509.cn (SPEC section 4.6).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
     "svid_types": {
       "description": "The default for the origin's svid_types; it does not apply to an origin with an audience restriction (SPEC section 4.5).",
       "type": "array",

@@ -38,6 +38,7 @@ import (
 	"github.com/PeterSR/spiffex/internal/ca"
 	"github.com/PeterSR/spiffex/internal/edkey"
 	"github.com/PeterSR/spiffex/internal/keyset"
+	"github.com/PeterSR/spiffex/internal/nametemplate"
 )
 
 // withCA gives the issuer a root of the trust domain, made two days before the
@@ -1084,4 +1085,78 @@ func emptyCASet(t *testing.T, now time.Time) *ca.Set {
 		t.Fatal("the set has a CA")
 	}
 	return set
+}
+
+// The common name follows the origin's x509.cn, and a template that cannot
+// name the identity fails the request instead of leaving the name out.
+func TestX509CommonNameTemplate(t *testing.T) {
+	var logs syncBuffer
+	f := newTokenFixtureWith(t, func(f *tokenFixture, cfg *Config) {
+		withCA(t, longValidity, nil)(f, cfg)
+		cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	})
+	request := func(client string) response {
+		return f.post(t, f.x509Form(t, client, enc(csrDER(t, newKey(t), nil))))
+	}
+	subject := func(resp response) (cn string, orgs []string) {
+		leaf := x509Chain(t, resp)[0]
+		return leaf.Subject.CommonName, leaf.Subject.Organization
+	}
+
+	t.Run("path", func(t *testing.T) {
+		resp := request("cnpath/m")
+		if cn, orgs := subject(resp); cn != "cnpath/m" || len(orgs) != 1 || orgs[0] != "example.org" {
+			t.Errorf("CN %q, O %v", cn, orgs)
+		}
+		if resp.body["spiffe_id"] != "spiffe://example.org/cnpath/m" {
+			t.Errorf("SPIFFE ID %v", resp.body["spiffe_id"])
+		}
+		if leaf := x509Chain(t, resp)[0]; len(leaf.URIs) != 1 || leaf.URIs[0].String() != "spiffe://example.org/cnpath/m" {
+			t.Errorf("SAN %v", leaf.URIs)
+		}
+	})
+	t.Run("hash with text", func(t *testing.T) {
+		want := "h-" + nametemplate.HashValue("/cnhash/m", 24)
+		if cn, _ := subject(request("cnhash/m")); cn != want {
+			t.Errorf("CN %q, want %q", cn, want)
+		}
+	})
+	t.Run("trim with text", func(t *testing.T) {
+		if cn, _ := subject(request("cntrim/m")); cn != "T:m" {
+			t.Errorf("CN %q", cn)
+		}
+	})
+	t.Run("default is the SPIFFE ID", func(t *testing.T) {
+		if cn, _ := subject(request("vms/billing")); cn != "spiffe://example.org/vms/billing" {
+			t.Errorf("CN %q", cn)
+		}
+	})
+	t.Run("a name over 64 characters fails", func(t *testing.T) {
+		resp := request("cntrim/" + strings.Repeat("n", 70))
+		if resp.status != http.StatusBadRequest || resp.body["error"] != "invalid_request" {
+			t.Errorf("status %d, %v", resp.status, resp.body)
+		}
+		if _, ok := resp.body["access_token"]; ok {
+			t.Error("a certificate came out")
+		}
+	})
+	t.Run("a trim that does not apply fails", func(t *testing.T) {
+		resp := request("cnbad/m")
+		if resp.status != http.StatusBadRequest || resp.body["error"] != "invalid_request" {
+			t.Errorf("status %d, %v", resp.status, resp.body)
+		}
+		if cn, _ := subject(request("cnbad/m-x")); cn != "B:m" {
+			t.Errorf("CN %q", cn)
+		}
+	})
+	if !strings.Contains(logs.String(), "x509.cn cannot name an identity") || !strings.Contains(logs.String(), "origin=cnbad") {
+		t.Errorf("the refusal is not logged:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "without a common name") {
+		t.Errorf("warned about a missing common name for a template:\n%s", logs.String())
+	}
+	// The failed requests issued nothing.
+	if n := strings.Count(logs.String(), "issued X.509-SVID"); n != 5 {
+		t.Errorf("%d certificates logged, want 5", n)
+	}
 }

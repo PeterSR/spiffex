@@ -78,6 +78,9 @@ func (s *Server) authorizeOrigin(b *base, c caller, name string, o *state.Origin
 		if state.Overlap(e.Prefix, x.Prefix) {
 			return errorf(http.StatusConflict, "prefix %s overlaps prefix %s of origin %s, which you may not read", e.Prefix, x.Prefix, other)
 		}
+		if state.CommonNamesMayClash(e, x) {
+			return errorf(http.StatusConflict, "its X.509 common names could equal those of origin %s, which you may not read", other)
+		}
 		if e.JWT != nil && x.JWT != nil && e.JWT.Issuer == x.JWT.Issuer && e.JWT.Audience == x.JWT.Audience {
 			return errorf(http.StatusConflict, "origin %s, which you may not read, already takes tokens from %s with audience %s", other, x.JWT.Issuer, x.JWT.Audience)
 		}
