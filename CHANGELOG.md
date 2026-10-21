@@ -7,6 +7,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-21
+
 ### Added
 
 - `spiffex dev -exchange` makes a local trust domain whose workloads use RFC 8693 token exchange,
@@ -288,7 +290,8 @@ The first version: an issuer, an agent and the `spiffex` command, following vers
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
 
-[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.4.0
 [0.3.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.3.1
 [0.2.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.2.0
 [0.1.3]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.3
