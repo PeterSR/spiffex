@@ -7,6 +7,29 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-21
+
+### Added
+
+- `spiffex dev -exchange` makes a local trust domain whose workloads use RFC 8693 token exchange,
+  as pods do in a cluster, instead of holding keys. It writes a local upstream (`upstream.key`, its
+  public key inline in a `jwt` provider `dev`) and one origin per `-origin NAME=TEMPLATE`, such as
+  `tenant={tenant}/{service}`, whose placeholders are claims of the subject token. Without
+  `-origin` there is one origin, `dev={service}`.
+- `spiffex dev token -dir DIR PATH` signs a subject token for the workload `PATH` with that
+  upstream, its claims read back from the origin's name template. It prints the token, or with
+  `-out` replaces a file in one step, and checks first that the origin admits it, so origins edited
+  by hand work too (`-claim NAME=VALUE` adds claims they require). An agent can run it as its
+  `-subject-token-command`.
+- `spiffex dev -ca` also makes a root CA, so that the local issuer issues X.509-SVIDs.
+- `spiffex dev` removes the directory it made when it fails partway.
+
+### Security
+
+- Built with filippo.io/edwards25519 1.1.1, which fixes `MultiScalarMult` on a receiver that is not
+  the identity. spiffex does not call it (govulncheck finds no affected code), so 0.3.1 is not
+  affected; the update keeps scanners of the binaries and the image quiet.
+
 ## [0.3.1] - 2026-10-21
 
 The first release with these changes. The `v0.3.0` tag was never released: Go 1.26.9 has a
@@ -273,7 +296,8 @@ The first version: an issuer, an agent and the `spiffex` command, following vers
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
 
-[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.4.0
 [0.3.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.3.1
 [0.2.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.2.0
 [0.1.3]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.3

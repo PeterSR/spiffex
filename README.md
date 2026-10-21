@@ -68,12 +68,12 @@ Each release, listed on [the releases page](https://github.com/PeterSR/spiffex/r
 - **Binaries** for Linux and macOS, amd64 and arm64: download the archive for your platform,
   `checksums.txt` and its signature, and verify them ([RELEASING.md](RELEASING.md#verifying-a-release))
   before unpacking `spiffex`.
-- **An image**, `ghcr.io/petersr/spiffex:v0.3.1`, for `linux/amd64` and `linux/arm64`, distroless
+- **An image**, `ghcr.io/petersr/spiffex:v0.4.0`, for `linux/amd64` and `linux/arm64`, distroless
   and running as a non-root user. Pin it by digest once you have verified it.
 - **A Helm chart** for the issuer, `oci://ghcr.io/petersr/charts/spiffex`:
 
   ```bash
-  helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.3.1 \
+  helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.4.0 \
     --namespace spiffex -f values.yaml
   ```
 
@@ -134,6 +134,22 @@ kubectl -n shop exec deploy/billing -c spiffex-agent -- /spiffex token \
   -subject-token-file /var/run/secrets/spiffex/token \
   -audience spiffe://example.org/cluster/ns/shop/sa/orders
 ```
+
+To try that path on a laptop, `spiffex dev -exchange` stands in for the cluster: a local upstream
+whose subject tokens `spiffex dev token` signs, and origins that name workloads by their claims.
+Every path an origin's template fits is a workload, with nothing to add to the state. `-ca` adds a
+certificate authority for X.509-SVIDs:
+
+```bash
+./spiffex dev -dir ./td-x -exchange -ca -origin 'tenant={tenant}/{service}' -origin 'platform={service}'
+./spiffex issuer -config ./td-x/issuer.yaml -listen 127.0.0.1:8443
+./spiffex dev token -dir ./td-x -out ./td-x/subject.jwt tenant/acme/backend
+./spiffex token -issuer http://127.0.0.1:8443 -subject-token-file ./td-x/subject.jwt -audience orders
+```
+
+An agent takes `-subject-token-command 'spiffex dev token -dir /abs/path/td-x tenant/acme/backend'`
+and mints a fresh token for each request. It runs the command without a shell, so `spiffex` must be
+on `PATH`; `spiffex dev` prints the command with the directory's absolute path.
 
 To get an X.509-SVID instead, give the issuer a certificate authority (`spiffex ca init -dir DIR
 -trust-domain TD`, then `ca_dir` in the settings) and ask the agent for one:
