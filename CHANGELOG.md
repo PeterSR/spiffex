@@ -7,7 +7,11 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-10-20
+## [0.3.1] - 2026-10-21
+
+The first release with these changes. The `v0.3.0` tag was never released: Go 1.26.9 has a
+`crypto/x509` vulnerability (GO-2026-6809) that stopped its release build, so 0.3.1 is built with
+Go 1.26.10.
 
 ### Added
 
@@ -269,8 +273,8 @@ The first version: an issuer, an agent and the `spiffex` command, following vers
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
 
-[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.3.0
+[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.3.1
 [0.2.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.2.0
 [0.1.3]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.3
 [0.1.3-rc.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.1.3-rc.1
