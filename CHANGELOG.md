@@ -24,6 +24,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `spiffex dev -ca` also makes a root CA, so that the local issuer issues X.509-SVIDs.
 - `spiffex dev` removes the directory it made when it fails partway.
 
+### Security
+
+- Built with filippo.io/edwards25519 1.1.1, which fixes `MultiScalarMult` on a receiver that is not
+  the identity. spiffex does not call it (govulncheck finds no affected code), so 0.3.1 is not
+  affected; the update keeps scanners of the binaries and the image quiet.
+
 ## [0.3.1] - 2026-10-21
 
 The first release with these changes. The `v0.3.0` tag was never released: Go 1.26.9 has a
