@@ -135,6 +135,22 @@ kubectl -n shop exec deploy/billing -c spiffex-agent -- /spiffex token \
   -audience spiffe://example.org/cluster/ns/shop/sa/orders
 ```
 
+To try that path on a laptop, `spiffex dev -exchange` stands in for the cluster: a local upstream
+whose subject tokens `spiffex dev token` signs, and origins that name workloads by their claims.
+Every path an origin's template fits is a workload, with nothing to add to the state. `-ca` adds a
+certificate authority for X.509-SVIDs:
+
+```bash
+./spiffex dev -dir ./td-x -exchange -ca -origin 'tenant={tenant}/{service}' -origin 'platform={service}'
+./spiffex issuer -config ./td-x/issuer.yaml -listen 127.0.0.1:8443
+./spiffex dev token -dir ./td-x -out ./td-x/subject.jwt tenant/acme/backend
+./spiffex token -issuer http://127.0.0.1:8443 -subject-token-file ./td-x/subject.jwt -audience orders
+```
+
+An agent takes `-subject-token-command 'spiffex dev token -dir /abs/path/td-x tenant/acme/backend'`
+and mints a fresh token for each request. It runs the command without a shell, so `spiffex` must be
+on `PATH`; `spiffex dev` prints the command with the directory's absolute path.
+
 To get an X.509-SVID instead, give the issuer a certificate authority (`spiffex ca init -dir DIR
 -trust-domain TD`, then `ca_dir` in the settings) and ask the agent for one:
 
