@@ -7,6 +7,15 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-22
+
+### Fixed
+
+- `spiffex dev` no longer refuses a `-dir` too deep for a Unix socket. It never binds the agent's
+  socket, which only its printed walkthrough names; for such a directory the walkthrough names a
+  socket in `/tmp` instead. The old check also let through directories a few bytes too deep for
+  the agent, which creates its socket in a private directory beside the final path.
+
 ## [0.4.0] - 2026-10-21
 
 ### Added
@@ -296,7 +305,8 @@ The first version: an issuer, an agent and the `spiffex` command, following vers
   through go-spiffe, py-spiffe and PyJWT, through an agent, a JWT source, the bundle endpoint and
   OIDC discovery.
 
-[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/PeterSR/spiffex/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.4.1
 [0.4.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.4.0
 [0.3.1]: https://github.com/PeterSR/spiffex/releases/tag/v0.3.1
 [0.2.0]: https://github.com/PeterSR/spiffex/releases/tag/v0.2.0

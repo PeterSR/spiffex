@@ -135,7 +135,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: issuer
-          image: ghcr.io/petersr/spiffex:v0.4.0
+          image: ghcr.io/petersr/spiffex:v0.4.1
           args:
             - issuer
             - -config=/config/issuer.yaml

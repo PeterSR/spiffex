@@ -36,7 +36,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: spiffex-agent
-          image: ghcr.io/petersr/spiffex:v0.4.0
+          image: ghcr.io/petersr/spiffex:v0.4.1
           restartPolicy: Always
           args:
             - agent
