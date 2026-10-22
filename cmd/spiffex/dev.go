@@ -5,6 +5,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -247,18 +249,6 @@ func runDev(_ context.Context, args []string) (err error) {
 		return err
 	}
 	*dir = abs
-	sockets := []string{filepath.Join(*dir, "agent.sock")}
-	if !*exchange {
-		sockets = nil
-		for _, name := range names {
-			sockets = append(sockets, filepath.Join(*dir, name+".sock"))
-		}
-	}
-	for _, sock := range sockets {
-		if len(sock) > 103 {
-			return fmt.Errorf("the agent socket %s would be longer than Unix sockets allow; use a shorter -dir", sock)
-		}
-	}
 
 	if err := os.Mkdir(*dir, 0o700); err != nil {
 		return err
@@ -326,6 +316,7 @@ func runDev(_ context.Context, args []string) (err error) {
 	if len(ws) > 1 {
 		second = ws[1]
 	}
+	socket, socketNote := devSocket(*dir, first.Name)
 	fmt.Printf(`Created a local trust domain %[1]s in %[2]s, for trying spiffex out.
 Not for production: the issuer serves plain HTTP and its signing key sits in that directory.
 
@@ -335,15 +326,15 @@ Run the issuer:
 
 Run an agent for %[4]s, then point any SPIFFE library at it:
 
-  spiffex agent -issuer %[5]s -client-id %[8]s -key-file %[2]s/workloads/%[4]s.key -socket %[2]s/%[4]s.sock
-  export SPIFFE_ENDPOINT_SOCKET=unix://%[2]s/%[4]s.sock
-
+  spiffex agent -issuer %[5]s -client-id %[8]s -key-file %[2]s/workloads/%[4]s.key -socket %[11]s
+  export SPIFFE_ENDPOINT_SOCKET=unix://%[11]s
+%[12]s
 Or fetch a token for %[6]s to call %[4]s with, without an agent:
 
   spiffex token -issuer %[5]s -client-id %[9]s -key-file %[2]s/workloads/%[6]s.key -audience %[7]s
 
 Workloads are members of the origin %[10]s in %[2]s/state.yaml, which the issuer rereads while it runs.
-`, td.Name(), *dir, *listen, first.Name, issuerURL, second.Name, first.ID, first.ClientID, second.ClientID, devOrigin)
+`, td.Name(), *dir, *listen, first.Name, issuerURL, second.Name, first.ID, first.ClientID, second.ClientID, devOrigin, socket, socketNote)
 	if *withCA {
 		fmt.Printf(`
 The issuer also issues X.509-SVIDs, from the root CA in %[1]s/ca. The agent serves them, or write one to files:
@@ -393,6 +384,7 @@ func devExchangeSetup(dir, listen, issuerURL string, td spiffeid.TrustDomain, or
 		command = string(words)
 	}
 	command = strings.ReplaceAll(command, "'", `'\''`)
+	socket, socketNote := devSocket(dir, "agent")
 	fmt.Printf(`Created a local trust domain %[1]s in %[2]s, for trying spiffex out.
 Not for production: the issuer serves plain HTTP and its signing key sits in that directory.
 Workloads prove who they are with subject tokens, as pods do with service account tokens:
@@ -404,14 +396,14 @@ Run the issuer:
 
 Run an agent for %[4]s, which mints a subject token for each request, then point any SPIFFE library at it:
 
-  spiffex agent -issuer %[5]s -subject-token-command '%[7]s' -socket %[2]s/agent.sock
-  export SPIFFE_ENDPOINT_SOCKET=unix://%[2]s/agent.sock
-
+  spiffex agent -issuer %[5]s -subject-token-command '%[7]s' -socket %[8]s
+  export SPIFFE_ENDPOINT_SOCKET=unix://%[8]s
+%[9]s
 Or write a subject token to a file and exchange it for a JWT-SVID, without an agent:
 
   spiffex dev token -dir %[2]s -out %[2]s/subject.jwt %[4]s
   spiffex token -issuer %[5]s -subject-token-file %[2]s/subject.jwt -audience orders
-`, td.Name(), dir, listen, example, issuerURL, devUpstreamKey, command)
+`, td.Name(), dir, listen, example, issuerURL, devUpstreamKey, command, socket, socketNote)
 	if withCA {
 		fmt.Printf(`
 The issuer also issues X.509-SVIDs, from the root CA in %[1]s/ca. The agent serves them, or write one to files:
@@ -425,6 +417,24 @@ The issuer also issues X.509-SVIDs, from the root CA in %[1]s/ca. The agent serv
 	}
 	fmt.Println("\nA workload is any path an origin's template fits, with nothing to add to the state.")
 	return nil
+}
+
+// devSocket returns the socket that the walkthrough of spiffex dev names
+// for an agent, NAME.sock in dir. spiffex dev never binds it, so a dir too
+// deep for a Unix socket is no reason to refuse; the walkthrough names a
+// socket in /tmp instead, with a note on why. The note is empty or ends in
+// a newline.
+func devSocket(dir, name string) (socket, note string) {
+	socket = filepath.Join(dir, name+".sock")
+	// The agent creates the socket in a private directory of up to 13
+	// bytes, .sx and a number, beside it and moves it into place.
+	if len(socket) <= 103 && len(filepath.Dir(socket))+len("/.sx4294967295/s") <= 103 {
+		return socket, ""
+	}
+	// The name is left out, so the socket's length is fixed whatever it is.
+	sum := sha256.Sum256([]byte(socket))
+	short := filepath.Join("/tmp", "spiffex-"+hex.EncodeToString(sum[:8])+".sock")
+	return short, fmt.Sprintf("  (A socket in %s would be too long for a Unix socket, so this one is in /tmp.)\n", dir)
 }
 
 func writeTemplate(path string, tmpl *template.Template, data any) error {

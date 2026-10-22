@@ -310,3 +310,47 @@ func TestDevExchangeRefusals(t *testing.T) {
 		}
 	}
 }
+
+// TestDevDeepDir checks that spiffex dev makes a trust domain in a directory
+// too deep for a Unix socket, and that its walkthrough names a socket an
+// agent can listen on.
+func TestDevDeepDir(t *testing.T) {
+	if socket, note := devSocket("/d", "agent"); socket != "/d/agent.sock" || note != "" {
+		t.Errorf("devSocket(/d) = %s, %q", socket, note)
+	}
+	// A directory short enough for the agent's staging socket, with a name
+	// that makes the socket itself too long.
+	dir80 := "/" + strings.Repeat("d", 79)
+	if socket, _ := devSocket(dir80, "short"); socket != dir80+"/short.sock" {
+		t.Errorf("devSocket(%s, short) = %s", dir80, socket)
+	}
+	for _, name := range []string{"inventory-services1", strings.Repeat("n", 200)} {
+		if socket, note := devSocket(dir80, name); len(socket) > 103 || !strings.HasPrefix(socket, "/tmp/") || note == "" {
+			t.Errorf("devSocket(%s, %s) = %s, %q", dir80, name, socket, note)
+		}
+	}
+	for _, args := range [][]string{{"-exchange"}, {"-workloads", "orders"}} {
+		parent := filepath.Join(t.TempDir(), strings.Repeat("deep", 30))
+		if err := os.Mkdir(parent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(parent, "td")
+		out, err := captureStdout(t, func() error { return runDev(context.Background(), append([]string{"-dir", dir}, args...)) })
+		if err != nil {
+			t.Fatalf("dev %v: %v", args, err)
+		}
+		name := "agent"
+		if args[0] != "-exchange" {
+			name = "orders"
+		}
+		socket, note := devSocket(dir, name)
+		if !strings.HasPrefix(socket, "/tmp/") || !strings.Contains(out, "-socket "+socket+"\n") || !strings.Contains(out, note) {
+			t.Fatalf("dev %v does not name the socket %s:\n%s", args, socket, out)
+		}
+		l, err := agent.Listen(socket, 0o600)
+		if err != nil {
+			t.Fatalf("dev %v names a socket no agent can listen on: %v", args, err)
+		}
+		l.Close()
+	}
+}

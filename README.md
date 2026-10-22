@@ -68,12 +68,12 @@ Each release, listed on [the releases page](https://github.com/PeterSR/spiffex/r
 - **Binaries** for Linux and macOS, amd64 and arm64: download the archive for your platform,
   `checksums.txt` and its signature, and verify them ([RELEASING.md](RELEASING.md#verifying-a-release))
   before unpacking `spiffex`.
-- **An image**, `ghcr.io/petersr/spiffex:v0.4.0`, for `linux/amd64` and `linux/arm64`, distroless
+- **An image**, `ghcr.io/petersr/spiffex:v0.4.1`, for `linux/amd64` and `linux/arm64`, distroless
   and running as a non-root user. Pin it by digest once you have verified it.
 - **A Helm chart** for the issuer, `oci://ghcr.io/petersr/charts/spiffex`:
 
   ```bash
-  helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.4.0 \
+  helm install spiffex-issuer oci://ghcr.io/petersr/charts/spiffex --version 0.4.1 \
     --namespace spiffex -f values.yaml
   ```
 
